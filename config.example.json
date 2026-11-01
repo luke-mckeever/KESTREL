@@ -1,0 +1,5 @@
+{
+  "abusech_auth_key": "YOUR_ABUSECH_AUTH_KEY",
+  "nvd_api_key": "YOUR_NVD_API_KEY",
+  "greynoise_api_key": "YOUR_GREYNOISE_API_KEY"
+}

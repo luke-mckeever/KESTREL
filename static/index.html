@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KESTREL · Cyber Threat Observatory</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23141416'/%3E%3Cpath d='M16 6 L27 16 L16 14 L5 16Z M16 14 L18.5 27 L16 24 L13.5 27Z' fill='%23f5a524'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-screen="face">
+<div id="boot"><div class="boot-inner"><svg viewBox="0 0 32 32" class="boot-logo"><path d="M16 6 L27 16 L16 14 L5 16Z M16 14 L18.5 27 L16 24 L13.5 27Z"/></svg><div class="boot-title">KESTREL</div><div class="boot-bar"><span></span></div><div class="boot-log" id="bootLog">connecting to feeds…</div></div></div>
+
+<header id="topbar">
+  <button class="icon-btn" id="railToggle" title="Collapse sidebar ([)"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  <div class="brand">
+    <svg viewBox="0 0 32 32" class="logo"><path d="M16 6 L27 16 L16 14 L5 16Z M16 14 L18.5 27 L16 24 L13.5 27Z"/></svg>
+    <span class="name">KESTREL</span><span class="sub">Threat Observatory</span>
+  </div>
+  <div id="levelPill" class="level" data-goto="pressure" title="Threat Pressure Index"><span class="lv-dot"></span><span class="lv-txt">—</span><span class="lv-num"></span></div>
+  <div class="tb-right">
+    <form id="searchForm" autocomplete="off"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg><input id="search" placeholder="Investigate IP, CVE or keyword" spellcheck="false"><kbd>/</kbd></form>
+    <a class="screen-link" id="screenLink" href="http://127.0.0.1:8788/" target="kestrel-analytics" title="Open screen 2 (analytics)"><svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg>Analytics</a>
+    <div class="clock"><span id="clock">--:--:--</span> UTC</div>
+    <button class="icon-btn" id="btnRefresh" title="Refresh all feeds (R)"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5"/></svg></button>
+    <button class="icon-btn" id="btnFocus" title="Map focus mode (F)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
+    <button class="icon-btn" id="btnSettings" title="Customise (S)"><svg viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg></button>
+  </div>
+</header>
+
+<main id="stage">
+  <aside id="rail">
+    <section class="rail-sec" id="kpiCtl">
+      <div class="rail-h"><span>Situation</span><button id="kpiToggle" title="Collapse">–</button></div>
+      <div id="kpis"></div>
+    </section>
+    <section class="rail-sec" id="layerCtl">
+      <div class="rail-h"><span>Map overlays</span><button id="lcToggle" title="Collapse (L)">–</button></div>
+      <div id="layerList"></div>
+    </section>
+    <div class="rail-foot">Live OSINT · refreshed automatically<br>Press <kbd>S</kbd> to customise</div>
+  </aside>
+  <section id="mapwrap">
+    <div id="map"></div>
+    <div id="hud">
+      <span id="hudCoords">—</span>
+      <button id="btnPings" title="Animate live events on the map">Live pings on</button>
+      <button id="btnHome" title="Fit the whole world (H)">World</button>
+    </div>
+    <div id="geoNote" class="hidden"></div>
+  </section>
+  <div id="dockResizer" title="Drag to resize"></div>
+  <aside id="dock"></aside>
+</main>
+
+<footer id="ticker"><div class="tk-label">Wire</div><div class="tk-track"><div class="tk-inner" id="tickerInner"></div></div></footer>
+
+<div id="drawer" aria-hidden="true">
+  <div class="dr-head"><h2>Customise</h2><button id="drClose" class="icon-btn" title="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <div class="dr-body">
+    <section><h4>Theme</h4>
+      <div class="themes" id="segTheme">
+        <button data-v="obsidian"><i style="background:#0c0c0e"></i><i style="background:#f5a524"></i>Obsidian</button>
+        <button data-v="carbon"><i style="background:#0e1012"></i><i style="background:#ef4444"></i>Carbon</button>
+        <button data-v="midnight"><i style="background:#0b0d1a"></i><i style="background:#8b7bff"></i>Midnight</button>
+        <button data-v="moss"><i style="background:#0b0f0c"></i><i style="background:#9bd17f"></i>Moss</button>
+      </div>
+    </section>
+    <section><h4>Layout</h4>
+      <div class="seg" id="segLayout">
+        <button data-v="right">Panels right</button><button data-v="left">Panels left</button><button data-v="bottom">Panels below</button><button data-v="map">Map only</button>
+      </div>
+      <label class="row">Panel columns <select id="selCols"><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+      <label class="row">Show situation rail <input type="checkbox" id="chkRail"></label>
+      <label class="row">Show news ticker <input type="checkbox" id="chkTicker"></label>
+      <label class="row">Compact panels <input type="checkbox" id="chkCompact"></label>
+    </section>
+    <section><h4>Map</h4>
+      <div class="seg" id="segBase"><button data-v="satellite">Satellite</button><button data-v="muted">Muted satellite</button><button data-v="dark">Dark vector-style</button></div>
+      <label class="row">Place labels <input type="checkbox" id="chkLabels"></label>
+    </section>
+    <section><h4>Refresh</h4>
+      <label class="row">Poll interval <select id="selRefresh"><option value="2">2 min</option><option value="5">5 min</option><option value="10">10 min</option><option value="30">30 min</option></select></label>
+    </section>
+    <section><h4>Panels <small>drag a panel's grip to reorder</small></h4><div id="panelToggles"></div></section>
+    <section><h4>Feed health</h4><div id="feedHealth"></div></section>
+    <section class="dr-foot">
+      <button id="btnExport">Export layout</button><button id="btnImport">Import layout</button><button id="btnReset" class="danger">Reset to default</button>
+    </section>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
+<script src="charts.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

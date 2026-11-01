@@ -1,0 +1,21 @@
+# Local secrets: copy config.example.json to config.json and keep it out of git
+config.json
+.env
+*.env
+
+# Runtime cache and state
+.cache/
+.kestrel.pid
+__pycache__/
+*.pyc
+
+# Local backups and editor or tool folders
+backups/
+.claude/
+.vscode/
+.idea/
+
+# OS clutter
+.DS_Store
+Thumbs.db
+desktop.ini
