@@ -669,10 +669,11 @@ def _one_news(src, url):
         link = _strip(tag("link"))
         if not title or not link.startswith("http"):
             continue
-        desc = _strip(tag("description"))[:260]
-        out.append({"source": src, "title": title, "link": link, "summary": desc,
+        full = _strip(tag("description"))
+        desc = full[:260]
+        out.append({"source": src, "title": title, "link": link, "summary": desc, "text": full[:1500],
                     "published": parse_dt(_strip(tag("pubDate")) or _strip(tag("dc:date"))),
-                    "cves": sorted(set(re.findall(r"CVE-\d{4}-\d{4,7}", title + " " + desc)))[:4],
+                    "cves": sorted(set(re.findall(r"CVE-\d{4}-\d{4,7}", title + " " + full[:1500])))[:8],
                     "tags": _tag(title + " " + desc)})
     return out
 
@@ -690,6 +691,43 @@ def feed_news():
         raise IOError("all news feeds failed: %s" % errors)
     items.sort(key=lambda x: x["published"] or "", reverse=True)
     return {"items": items[:120], "errors": errors, "sources": [s for s, _ in NEWS_FEEDS]}
+
+
+# ---- EPSS scores for the CVEs KESTREL is already tracking -------------------
+def _feed_data(name):
+    fn, ttl, _, _ = FEEDS[name]
+    try:
+        return CACHE.get(name, ttl, fn)["data"]
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def feed_epss():
+    """FIRST.org EPSS (exploit prediction) for recent KEV entries, critical CVEs and CVEs in the news."""
+    kev, cves, news = _feed_data("kev"), _feed_data("cves"), _feed_data("news")
+    cand = []
+    for n in news.get("items", []):
+        cand += n.get("cves", [])
+    cand += [k["cve"] for k in kev.get("items", [])[:40]]
+    scored = sorted([c for c in cves.get("items", []) if c.get("score")], key=lambda c: -c["score"])
+    cand += [c["id"] for c in scored[:40]]
+    seen, ids = set(), []
+    for c in cand:
+        if c not in seen:
+            seen.add(c)
+            ids.append(c)
+    ids = ids[:120]
+    out = {}
+    for i in range(0, len(ids), 40):
+        chunk = ids[i:i + 40]
+        d = get_json("https://api.first.org/data/v1/epss?scope=time-series&cve=" + ",".join(chunk), timeout=40)
+        for r in d.get("data", []):
+            series = [{"date": t.get("date"), "epss": float(t.get("epss") or 0)} for t in (r.get("time-series") or [])]
+            series.sort(key=lambda t: t["date"] or "")
+            out[r["cve"]] = {"cve": r["cve"], "epss": float(r.get("epss") or 0),
+                             "percentile": float(r.get("percentile") or 0), "date": r.get("date"),
+                             "series": [t["epss"] for t in series][-30:]}
+    return {"items": sorted(out.values(), key=lambda r: -r["epss"]), "candidates": len(ids)}
 
 
 # ---- Optional keyed feeds -------------------------------------------------
@@ -786,6 +824,7 @@ FEEDS = {
     "urlhaus": (feed_urlhaus, 1800, "ip", "abuse.ch URLhaus (key)"),
     "porthist": (feed_porthist, 6 * 3600, None, "SANS ISC port history"),
     "home": (feed_home, 86400, None, "Observer location"),
+    "epss": (feed_epss, 6 * 3600, None, "FIRST.org EPSS"),
 }
 
 
@@ -980,7 +1019,7 @@ class AnalyticsHandler(Handler):
 
 def prewarm():
     order = ["kev", "ransomware", "c2", "attackers", "outages", "news", "cves", "phishing", "tor", "cables",
-             "threatfox", "urlhaus", "porthist", "home"]
+             "threatfox", "urlhaus", "porthist", "home", "epss"]
     for name in order:
         try:
             build_feed(name)

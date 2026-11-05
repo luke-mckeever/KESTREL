@@ -12,6 +12,9 @@ const fmtN = n => n == null ? '—' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n 
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const IP_RX = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]+:[0-9a-f:]*$/i;
 const CVE_RX = /^CVE-\d{4}-\d{4,7}$/i;
+// Phones get a single scrolling page (see the max-width: 760px block in style.css)
+const PHONE_MQ = matchMedia('(max-width: 760px)');
+const isPhone = () => PHONE_MQ.matches;
 function ago(iso) {
   if (!iso) return '—';
   const s = (Date.now() - Date.parse(iso)) / 1000;
@@ -32,7 +35,7 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.ad
 // Every panel exists on both; each screen just shows a different set by default.
 const SCREEN = document.body.dataset.screen === 'analytics' ? 'analytics' : 'face';
 const FACE_PANELS = ['pressure', 'livefeed', 'stream', 'ransomware', 'kev'];
-const CHART_PANELS = ['scope', 'kevtrend', 'spider', 'cvetimeline', 'ransomtimeline', 'porttrend', 'outagegantt', 'cwe'];
+const CHART_PANELS = ['tline', 'vulnboard', 'actorgraph', 'sectorheat', 'attackmx', 'scope', 'kevtrend', 'spider', 'cvetimeline', 'ransomtimeline', 'porttrend', 'outagegantt', 'cwe'];
 const OTHER_PANELS = ['cves', 'attackers', 'ports', 'hotspots', 'c2', 'phishing', 'outages', 'news', 'investigate'];
 const KEYED_PANELS = ['threatfox', 'urlhaus'];
 const PANEL_IDS = SCREEN === 'face'
@@ -46,8 +49,8 @@ const DEFAULTS = {
   hidden: Object.fromEntries(PANEL_IDS.filter(id => !SHOWN.includes(id)).map(id => [id, true])),
   collapsed: {},
   wide: SCREEN === 'face' ? { pressure: true, livefeed: true, stream: true, news: true, cves: true }
-    : { scope: true, kevtrend: true, cvetimeline: true, porttrend: true, news: true, cves: true },
-  layers: { ransomware: true, c2: true, attackers: true, compromised: true, phishing: true, tor: false, threatfox: true, urlhaus: true, outages: true, heat: false, cables: true },
+    : { tline: true, vulnboard: true, actorgraph: true, sectorheat: true, attackmx: true, scope: true, kevtrend: true, cvetimeline: true, porttrend: true, news: true, cves: true },
+  layers: { ransomware: true, c2: true, attackers: true, compromised: true, phishing: true, tor: false, threatfox: true, urlhaus: true, outages: true, heat: false, cables: true, paths: true, trails: true, night: true },
   pstate: {},
 };
 const LS_KEY = 'kestrel.settings.v2';
@@ -70,7 +73,7 @@ function save() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch
 const ps = id => (S.pstate[id] = S.pstate[id] || {});
 
 /* ------------------------------------------------------------------- data */
-const FEEDS = ['kev', 'ransomware', 'attackers', 'c2', 'outages', 'news', 'cves', 'phishing', 'tor', 'threatfox', 'urlhaus', 'home', 'porthist'];
+const FEEDS = ['kev', 'ransomware', 'attackers', 'c2', 'outages', 'news', 'cves', 'phishing', 'tor', 'threatfox', 'urlhaus', 'home', 'porthist', 'epss'];
 const GEO_FEEDS = ['c2', 'attackers', 'phishing', 'tor', 'threatfox', 'urlhaus'];
 const D = {}, META = {};
 let STATUS = null, INV = null;
@@ -118,6 +121,7 @@ async function geoPoll() {
 function onData(name, quiet) {
   for (const p of PANELS) if (p.deps.includes(name)) renderPanel(p.id);
   for (const L of LAYERS) if (L.feed === name || (L.id === 'heat' && GEO_FEEDS.includes(name))) updateLayer(L.id);
+  if (name === 'attackers' || name === 'home' || name === 'ransomware') buildArcs();
   renderKPIs();
   lfIngest();
   if (name === 'news' || name === 'ransomware' || name === 'kev') renderTicker();
@@ -157,7 +161,7 @@ function renderKPIs() {
   ];
   const pill = $('#levelPill');
   pill.querySelector('.lv-dot').style.background = p.lvl[1];
-  pill.querySelector('.lv-txt').textContent = p.score == null ? 'Threat level —' : `Threat level · ${p.lvl[0]}`;
+  pill.querySelector('.lv-txt').innerHTML = p.score == null ? '<span class="lv-pre">Threat level </span>—' : `<span class="lv-pre">Threat level · </span>${esc(p.lvl[0])}`;
   pill.querySelector('.lv-num').textContent = p.score == null ? '' : p.score + '/100';
   $('#kpis').innerHTML = k.map(([lbl, v, sub, pid, cls]) =>
     `<div class="kpi ${cls}" data-goto="${pid}" title="Show ${esc(pid)} panel"><div class="k">${esc(lbl)}</div><div class="v">${esc(v ?? '—')}<small>${esc(sub)}</small></div></div>`).join('');
@@ -512,7 +516,7 @@ function lfTick() {
   }
   const badge = $('.panel[data-id="livefeed"] .badge');
   if (badge) { badge.textContent = `${LF.rate} / min`; badge.style.display = ''; }
-  if (e.geo && S.pings) ping(e);
+  if (e.geo && S.pings) { ping(e); arcShot(e); }
 }
 let lfTimer;
 function lfSchedule() {
@@ -538,6 +542,7 @@ const COLORS = {};
 const FEAT = {}, LAYER_FC = {};
 const pointSize = (L, base) => ['interpolate', ['linear'], ['zoom'], 1, ['*', ['get', 'sz'], base], 5, ['*', ['get', 'sz'], base * 2], 10, ['*', ['get', 'sz'], base * 3]];
 const LAYERS = [
+  { id: 'night', name: 'Day / night terminator', kind: 'overlay', shape: 'half', color: '--dim' },
   { id: 'cables', name: 'Submarine cables', kind: 'line', color: '--cable' },
   { id: 'heat', name: 'Threat density heatmap', kind: 'heat', color: '--high' },
   { id: 'outages', name: 'Internet outages', feed: 'outages', kind: 'ring', color: '--outage', items: d => d.items, size: o => Math.max(1, Math.min(4, Math.log10(o.score + 10) - 1.5)), fresh: o => o.ongoing, label: o => `Outage · ${o.name}` },
@@ -549,11 +554,14 @@ const LAYERS = [
   { id: 'attackers', name: 'Top attackers (DShield)', feed: 'attackers', color: '--attk', base: 2.4, items: d => d.items, size: a => 1 + Math.min(2.2, a.reports / 120000), label: x => `Attacker #${x.rank} · ${x.ip}` },
   { id: 'c2', name: 'Botnet C2 servers', feed: 'c2', color: '--c2', base: 3.2, items: d => d.items, fresh: c => c.status === 'online', label: x => `${x.malware} C2 · ${x.ip}` },
   { id: 'ransomware', name: 'Ransomware victims', feed: 'ransomware', color: '--ransom', base: 3, items: d => d.items, fresh: r => Date.now() - Date.parse(r.discovered) < 86400e3, label: x => `${x.group} → ${x.victim}` },
+  { id: 'trails', name: 'Ransomware campaign trails', kind: 'overlay', shape: 'line', color: '--ransom' },
+  { id: 'paths', name: 'Live attack paths', kind: 'overlay', shape: 'line', color: '--attk' },
 ];
 const LAYER = Object.fromEntries(LAYERS.map(l => [l.id, l]));
 const BASE_PAINT = {
-  satellite: { 'raster-saturation': -0.2, 'raster-brightness-max': 0.82, 'raster-contrast': 0.05 },
-  muted: { 'raster-saturation': -0.9, 'raster-brightness-max': 0.5, 'raster-contrast': 0.15 },
+  // greyscale: fully desaturated so the coloured threat layers and attack paths stand out
+  satellite: { 'raster-saturation': -1, 'raster-brightness-max': 0.78, 'raster-contrast': 0.12 },
+  muted: { 'raster-saturation': -1, 'raster-brightness-max': 0.48, 'raster-contrast': 0.18 },
 };
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
 let map, hoverPop, invMarker, mapReady = false;
@@ -561,7 +569,7 @@ let map, hoverPop, invMarker, mapReady = false;
 function initMap() {
   for (const L of LAYERS) COLORS[L.id] = css(L.color);
   map = new maplibregl.Map({
-    container: 'map', center: [12, 24], zoom: 1.6, minZoom: 0.6, maxPitch: 0, pitchWithRotate: false, dragRotate: false, touchPitch: false,
+    container: 'map', center: isPhone() ? [15, 22] : [12, 24], zoom: isPhone() ? 0.3 : 1.6, minZoom: isPhone() ? 0 : 0.6, maxPitch: 0, pitchWithRotate: false, dragRotate: false, touchPitch: false,
     renderWorldCopies: true, attributionControl: false, fadeDuration: 0,
     style: {
       version: 8,
@@ -571,10 +579,10 @@ function initMap() {
         ref: { type: 'raster', tiles: [ESRI + 'Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19 },
       },
       layers: [
-        { id: 'bg', type: 'background', paint: { 'background-color': '#01040a' } },
+        { id: 'bg', type: 'background', paint: { 'background-color': '#050506' } },
         { id: 'sat', type: 'raster', source: 'sat' },
-        { id: 'dark', type: 'raster', source: 'dark', layout: { visibility: 'none' } },
-        { id: 'ref', type: 'raster', source: 'ref', paint: { 'raster-opacity': 0.75 } },
+        { id: 'dark', type: 'raster', source: 'dark', layout: { visibility: 'none' }, paint: { 'raster-saturation': -1 } },
+        { id: 'ref', type: 'raster', source: 'ref', paint: { 'raster-opacity': 0.75, 'raster-saturation': -1 } },
       ],
     },
   });
@@ -582,6 +590,8 @@ function initMap() {
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }), 'bottom-right');
   map.touchZoomRotate.disableRotation();
+  // phones: start with the map attribution folded away (tap the (i) to read it)
+  if (isPhone()) map.once('load', () => $('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
   hoverPop = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: 'hover-tip', offset: 10 });
 
   map.on('load', () => {
@@ -589,7 +599,9 @@ function initMap() {
     fitWorld(0);
     applyBase();
     const empty = { type: 'FeatureCollection', features: [] };
+    addNight();
     for (const L of LAYERS) {
+      if (L.kind === 'overlay') continue;
       map.addSource(L.id, { type: 'geojson', data: empty });
       const vis = S.layers[L.id] ? 'visible' : 'none';
       const c = COLORS[L.id];
@@ -620,10 +632,13 @@ function initMap() {
     map.on('mouseenter', 'cables', e => { map.getCanvas().style.cursor = 'crosshair'; hoverPop.setLngLat(e.lngLat).setHTML('Cable · ' + esc(e.features[0].properties.name)).addTo(map); });
     map.on('mousemove', 'cables', e => hoverPop.setLngLat(e.lngLat).setHTML('Cable · ' + esc(e.features[0].properties.name)));
     map.on('mouseleave', 'cables', () => { map.getCanvas().style.cursor = ''; hoverPop.remove(); });
+    addArcLayers();
     for (const L of LAYERS) if (L.feed && D[L.feed]) updateLayer(L.id);
     updateLayer('heat');
     loadCables();
+    buildArcs();
     requestAnimationFrame(pulse);
+    requestAnimationFrame(arcLoop);
   });
   map.on('mousemove', e => { $('#hudCoords').textContent = `${e.lngLat.lat.toFixed(3)}°, ${e.lngLat.lng.toFixed(3)}°`; });
 }
@@ -672,7 +687,7 @@ function renderLayerList() {
   const el = $('#layerList');
   if (!el) return;
   el.innerHTML = [...LAYERS].reverse().map(L => {
-    const shape = L.kind === 'line' ? 'line' : L.kind === 'ring' ? 'ring' : '';
+    const shape = L.shape || (L.kind === 'line' ? 'line' : L.kind === 'ring' ? 'ring' : '');
     const locked = L.key && D[L.feed]?.needsKey;
     return `<div class="lyr ${S.layers[L.id] && !locked ? '' : 'off'} ${locked ? 'locked' : ''}" data-layer="${L.id}"><span class="sw ${shape}" style="color:${css(L.color)}"></span><span class="nm">${esc(L.name)}</span><span class="ct">${L.count != null ? fmtN(L.count) : ''}</span></div>`;
   }).join('');
@@ -681,7 +696,8 @@ function setLayerVis(id, on) {
   S.layers[id] = on; save();
   if (!map) return;
   const vis = on ? 'visible' : 'none';
-  for (const suf of ['', '-glow', '-pulse']) if (map.getLayer(id + suf)) map.setLayoutProperty(id + suf, 'visibility', vis);
+  for (const suf of ['', '-glow', '-pulse', '-edge']) if (map.getLayer(id + suf)) map.setLayoutProperty(id + suf, 'visibility', vis);
+  if (id === 'paths' || id === 'trails') buildArcs();
   renderLayerList();
 }
 
@@ -705,6 +721,206 @@ function pulse(t) {
     }
   }
   setTimeout(() => requestAnimationFrame(pulse), 50);
+}
+
+/* ---------------------------------------------- attack paths & live overlays */
+// Every arc comes from real feed data, nothing is invented:
+//  paths  - DShield's most-reported scanning sources -> your location (the "home" feed), plus a one-shot arc for each
+//           geolocated event the Live Threat Feed streams (threat origin -> you; ransomware arcs run from the same
+//           group's previous victim to the new one instead)
+//  trails - each ransomware group's victims in the order they were posted over the last 72h (its campaign path)
+//  night  - the real-time day/night terminator
+const ARC_MAX_PATHS = 36, ARC_TRAIL_HOURS = 72, ARC_MAX_TRAILS = 60, ARC_MAX_SHOTS = 14;
+const ARC = { paths: [], trails: [], shots: [], victims: {} };
+const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
+let homeMarker;
+
+// Curved arc between two [lon, lat] points on the flat map, taking the short way round and bowing toward the pole
+function arcCoords(a, b, n = 40) {
+  const [x1, y1] = a;
+  let [x2, y2] = b;
+  if (x2 - x1 > 180) x2 -= 360; else if (x2 - x1 < -180) x2 += 360;
+  const dx = x2 - x1, dy = y2 - y1, d = Math.hypot(dx, dy);
+  if (d < 1.2) return null;
+  const s = dx >= 0 ? 1 : -1, bend = Math.min(d * 0.24, 28);
+  const cx = (x1 + x2) / 2 - dy / d * bend * s, cy = Math.max(-80, Math.min(80, (y1 + y2) / 2 + dx / d * bend * s));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, u = 1 - t;
+    pts.push([u * u * x1 + 2 * u * t * cx + t * t * x2, Math.max(-84, Math.min(84, u * u * y1 + 2 * u * t * cy + t * t * y2))]);
+  }
+  return pts;
+}
+function arcAt(c, f) {
+  const n = c.length - 1, x = Math.max(0, Math.min(1, f)) * n, i = Math.min(Math.floor(x), n - 1), k = x - i;
+  return [c[i][0] + (c[i + 1][0] - c[i][0]) * k, c[i][1] + (c[i + 1][1] - c[i][1]) * k];
+}
+function arcSlice(c, f0, f1) {
+  f0 = Math.max(0, f0); f1 = Math.min(1, f1);
+  if (f1 - f0 < 0.002) return null;
+  const n = c.length - 1, out = [arcAt(c, f0)];
+  for (let i = Math.ceil(f0 * n); i < f1 * n; i++) if (i / n > f0) out.push(c[i]);
+  out.push(arcAt(c, f1));
+  return out;
+}
+const kindColor = k => css((LF_KINDS[k]?.color || 'var(--acc)').slice(4, -1));
+const homeLL = () => D.home && D.home.lat != null ? [D.home.lon, D.home.lat] : null;
+
+function buildArcs() {
+  if (!mapReady || !map.getSource('arc-base')) return;
+  const home = homeLL();
+  // scanners -> you
+  ARC.paths = [];
+  if (home && S.layers.paths) {
+    const top = (D.attackers?.items || []).filter(a => a.geo && a.geo.lat != null).slice(0, ARC_MAX_PATHS);
+    const maxR = Math.max(...top.map(a => a.reports), 1);
+    for (const a of top) {
+      const c = arcCoords([a.geo.lon, a.geo.lat], home);
+      if (!c) continue;
+      ARC.paths.push({ c, col: COLORS.attackers || css('--attk'), w: 1 + 1.4 * Math.sqrt(a.reports / maxR), dur: 2600 + Math.random() * 2600, off: Math.random(),
+        label: `Scanner ${a.ip}${a.geo.cc ? ' (' + a.geo.cc + ')' : ''} · ${fmtN(a.reports)} reports → ${D.home.name || 'you'}` });
+    }
+  }
+  // ransomware campaign trails: victim -> next victim, per group, in posting order
+  ARC.trails = []; ARC.victims = {};
+  const since = Date.now() - ARC_TRAIL_HOURS * 3600e3;
+  for (const v of D.ransomware?.items || []) {
+    if (!v.geo || v.geo.lat == null || !(Date.parse(v.discovered) > since)) continue;
+    (ARC.victims[v.group] = ARC.victims[v.group] || []).push(v);
+  }
+  const legs = [];
+  for (const [g, list] of Object.entries(ARC.victims)) {
+    list.sort((x, y) => Date.parse(x.discovered) - Date.parse(y.discovered));
+    for (let i = 1; i < list.length; i++) {
+      const p = list[i - 1], q = list[i];
+      if (p.cc && p.cc === q.cc) continue;
+      legs.push({ g, p, q, t: Date.parse(q.discovered) });
+    }
+  }
+  legs.sort((x, y) => y.t - x.t);
+  if (S.layers.trails) for (const L of legs.slice(0, ARC_MAX_TRAILS)) {
+    const c = arcCoords([L.p.geo.lon, L.p.geo.lat], [L.q.geo.lon, L.q.geo.lat]);
+    if (c) ARC.trails.push({ c, col: COLORS.ransomware || css('--ransom'), w: 1.3, dur: 3400 + Math.random() * 2400, off: Math.random(), ring: true,
+      label: `${L.g}: ${L.p.victim} (${L.p.cc || '?'}) → ${L.q.victim} (${L.q.cc || '?'})` });
+  }
+  LAYER.paths.count = home ? ARC.paths.length : null;
+  LAYER.trails.count = ARC.trails.length;
+  const feats = [...ARC.paths, ...ARC.trails].map(a => ({ type: 'Feature', geometry: { type: 'LineString', coordinates: a.c }, properties: { c: a.col, w: a.w, label: a.label } }));
+  map.getSource('arc-base').setData({ type: 'FeatureCollection', features: feats });
+  updateHome();
+  renderLayerList();
+}
+
+// Pulsing beacon at your location: the end point of every inbound path
+function updateHome() {
+  const home = homeLL();
+  if (!home || !S.layers.paths) { homeMarker?.remove(); homeMarker = null; return; }
+  if (!homeMarker) {
+    const el = document.createElement('div');
+    el.className = 'home-beacon';
+    el.innerHTML = '<i></i><i></i><i></i><b></b><span></span>';
+    homeMarker = new maplibregl.Marker({ element: el, anchor: 'center' });
+  }
+  homeMarker.getElement().querySelector('span').textContent = 'YOU · ' + (D.home.name || 'observer');
+  homeMarker.setLngLat(home).addTo(map);
+}
+
+// One-shot arc for a streamed Live Threat Feed event
+function arcShot(e) {
+  if (!mapReady || !S.layers.paths || REDUCED_MOTION || !e.geo || e.geo.lat == null) return;
+  let from, to;
+  if (e.kind === 'ransom') {
+    const [grp, victim] = e.id.slice(2).split('|');
+    const list = ARC.victims[grp] || [];
+    const i = list.findIndex(v => v.victim === victim);
+    if (i < 1 || !list[i - 1].geo) return;
+    from = [list[i - 1].geo.lon, list[i - 1].geo.lat]; to = [e.geo.lon, e.geo.lat];
+  } else if (['attack', 'c2', 'comp', 'phish', 'ioc'].includes(e.kind)) {
+    to = homeLL(); from = [e.geo.lon, e.geo.lat];
+    if (!to) return;
+  } else return;
+  const c = arcCoords(from, to);
+  if (!c) return;
+  if (ARC.shots.length >= ARC_MAX_SHOTS) ARC.shots.shift();
+  ARC.shots.push({ c, col: kindColor(e.kind), w: 2.2, start: performance.now(), dur: 1500 + Math.min(1500, Math.hypot(to[0] - from[0], to[1] - from[1]) * 9) });
+}
+
+function addArcLayers() {
+  const empty = { type: 'FeatureCollection', features: [] };
+  map.addSource('arc-base', { type: 'geojson', data: empty });
+  map.addSource('arc-trail', { type: 'geojson', data: empty });
+  map.addSource('arc-head', { type: 'geojson', data: empty });
+  map.addLayer({ id: 'arc-base', type: 'line', source: 'arc-base', layout: { 'line-cap': 'round' }, paint: { 'line-color': ['get', 'c'], 'line-opacity': 0.16, 'line-width': ['get', 'w'], 'line-dasharray': [1, 2.5] } });
+  map.addLayer({ id: 'arc-glow', type: 'line', source: 'arc-trail', layout: { 'line-cap': 'round' }, paint: { 'line-color': ['get', 'c'], 'line-opacity': ['*', ['get', 'o'], 0.35], 'line-width': ['*', ['get', 'w'], 4], 'line-blur': 4 } });
+  map.addLayer({ id: 'arc-trail', type: 'line', source: 'arc-trail', layout: { 'line-cap': 'round' }, paint: { 'line-color': ['get', 'c'], 'line-opacity': ['get', 'o'], 'line-width': ['get', 'w'] } });
+  map.addLayer({ id: 'arc-ring', type: 'circle', source: 'arc-head', filter: ['==', ['get', 'k'], 'ring'], paint: { 'circle-radius': ['get', 'r'], 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': ['get', 'c'], 'circle-stroke-width': 1.4, 'circle-stroke-opacity': ['get', 'o'] } });
+  map.addLayer({ id: 'arc-headglow', type: 'circle', source: 'arc-head', filter: ['==', ['get', 'k'], 'head'], paint: { 'circle-radius': ['*', ['get', 'w'], 4.5], 'circle-color': ['get', 'c'], 'circle-opacity': 0.35, 'circle-blur': 1 } });
+  map.addLayer({ id: 'arc-head', type: 'circle', source: 'arc-head', filter: ['==', ['get', 'k'], 'head'], paint: { 'circle-radius': ['*', ['get', 'w'], 1.3], 'circle-color': '#ffffff', 'circle-stroke-color': ['get', 'c'], 'circle-stroke-width': 1.2 } });
+  map.on('mouseenter', 'arc-base', e => { map.getCanvas().style.cursor = 'crosshair'; hoverPop.setLngLat(e.lngLat).setHTML(esc(e.features[0].properties.label)).addTo(map); });
+  map.on('mousemove', 'arc-base', e => hoverPop.setLngLat(e.lngLat).setHTML(esc(e.features[0].properties.label)));
+  map.on('mouseleave', 'arc-base', () => { map.getCanvas().style.cursor = ''; hoverPop.remove(); });
+}
+
+// Comet heads with fading tails travel along each path; trails ring the victim on arrival
+const TAIL = 0.2, TAIL_STEPS = [0.12, 0.3, 0.55, 1];
+function cometFeats(a, f, trail, head, ring) {
+  for (let i = 0; i < TAIL_STEPS.length; i++) {
+    const seg = arcSlice(a.c, f - TAIL + TAIL * i / TAIL_STEPS.length, f - TAIL + TAIL * (i + 1) / TAIL_STEPS.length);
+    if (seg) trail.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: seg }, properties: { c: a.col, w: a.w, o: TAIL_STEPS[i] } });
+  }
+  if (f >= 0 && f <= 1) head.push({ type: 'Feature', geometry: { type: 'Point', coordinates: arcAt(a.c, f) }, properties: { k: 'head', c: a.col, w: a.w } });
+  if (ring != null) head.push({ type: 'Feature', geometry: { type: 'Point', coordinates: a.c[a.c.length - 1] }, properties: { k: 'ring', c: a.col, r: 3 + ring * 22, o: (1 - ring) * 0.9 } });
+}
+function arcLoop(now) {
+  if (mapReady && !document.hidden && !REDUCED_MOTION && map.getSource('arc-trail')) {
+    const trail = [], head = [];
+    for (const a of [...ARC.paths, ...ARC.trails]) {
+      const f = ((now / a.dur) + a.off) % 1 * 1.25; // 1..1.25 = pause at the target while the tail drains
+      const r = a.ring && f > 1 ? (f - 1) / 0.25 : null;
+      cometFeats(a, f, trail, head, r);
+    }
+    ARC.shots = ARC.shots.filter(s => (now - s.start) / s.dur < 1.5);
+    for (const s of ARC.shots) {
+      const f = (now - s.start) / s.dur;
+      cometFeats(s, f, trail, head, f > 1 ? (f - 1) / 0.5 : null);
+    }
+    map.getSource('arc-trail').setData({ type: 'FeatureCollection', features: trail });
+    map.getSource('arc-head').setData({ type: 'FeatureCollection', features: head });
+  }
+  setTimeout(() => requestAnimationFrame(arcLoop), 33);
+}
+
+// Real-time day/night terminator (solar declination + subsolar longitude from the current UTC time)
+function nightPolygon(date = new Date()) {
+  const rad = Math.PI / 180;
+  const start = Date.UTC(date.getUTCFullYear(), 0, 0), doy = (date - start) / 864e5;
+  const g = 2 * Math.PI / 365 * (doy - 1);
+  const eot = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  let dec = -23.44 * Math.cos(2 * Math.PI / 365 * (doy + 10));
+  if (Math.abs(dec) < 0.2) dec = dec < 0 ? -0.2 : 0.2;
+  const utcMin = date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60;
+  const sunLon = -(utcMin + eot - 720) / 4;
+  const line = [];
+  for (let lon = -180; lon <= 180; lon += 2) line.push([lon, Math.atan(-Math.cos((lon - sunLon) * rad) / Math.tan(dec * rad)) / rad]);
+  const pole = dec > 0 ? -85 : 85;
+  return {
+    night: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[...line, [180, pole], [-180, pole], line[0]]] }, properties: {} },
+    edge: { type: 'Feature', geometry: { type: 'LineString', coordinates: line }, properties: {} },
+  };
+}
+function addNight() {
+  const { night, edge } = nightPolygon();
+  const vis = S.layers.night ? 'visible' : 'none';
+  map.addSource('night', { type: 'geojson', data: night });
+  map.addSource('night-edge', { type: 'geojson', data: edge });
+  map.addLayer({ id: 'night', type: 'fill', source: 'night', layout: { visibility: vis }, paint: { 'fill-color': '#000000', 'fill-opacity': 0.34, 'fill-antialias': false } });
+  map.addLayer({ id: 'night-edge', type: 'line', source: 'night-edge', layout: { visibility: vis }, paint: { 'line-color': css('--acc'), 'line-opacity': 0.22, 'line-width': 6, 'line-blur': 6 } });
+  setInterval(() => {
+    if (document.hidden || !map.getSource('night')) return;
+    const p = nightPolygon();
+    map.getSource('night').setData(p.night);
+    map.getSource('night-edge').setData(p.edge);
+  }, 60000);
 }
 
 function popupHTML(layerId, x) {
@@ -882,7 +1098,12 @@ function wire() {
   $('#btnFocus').onclick = () => setLayout(S.layout === 'map' ? (S.prevLayout || 'right') : (S.prevLayout = S.layout, 'map'));
   $('#lcToggle').onclick = () => { S.layerCollapsed = !S.layerCollapsed; $('#layerCtl').classList.toggle('collapsed', S.layerCollapsed); $('#lcToggle').textContent = S.layerCollapsed ? '+' : '–'; save(); };
   $('#kpiToggle').onclick = () => { S.kpiCollapsed = !S.kpiCollapsed; $('#kpiCtl').classList.toggle('collapsed', S.kpiCollapsed); $('#kpiToggle').textContent = S.kpiCollapsed ? '+' : '–'; save(); };
-  $('#railToggle').onclick = () => { if (!S.rail) { S.rail = true; S.railMin = false; } else S.railMin = !S.railMin; save(); applyLook(); syncSegs(); };
+  // On a phone the sidebar is a slide-in sheet; this doesn't touch the saved desktop layout
+  const scrim = document.createElement('div'); scrim.id = 'railScrim'; document.body.appendChild(scrim);
+  const railSheet = open => document.body.classList.toggle('rail-open', open);
+  scrim.onclick = () => railSheet(false);
+  PHONE_MQ.addEventListener('change', () => { railSheet(false); map?.resize(); });
+  $('#railToggle').onclick = () => { if (isPhone()) return railSheet(!document.body.classList.contains('rail-open')); if (!S.rail) { S.rail = true; S.railMin = false; } else S.railMin = !S.railMin; save(); applyLook(); syncSegs(); };
   $('#btnHome').onclick = () => fitWorld();
   const syncPings = () => { $('#btnPings').classList.toggle('on', S.pings); $('#btnPings').textContent = S.pings ? 'Live pings on' : 'Live pings off'; };
   $('#btnPings').onclick = () => { S.pings = !S.pings; save(); syncPings(); };
@@ -938,7 +1159,7 @@ function wire() {
     else if (e.key === '[') $('#railToggle').click();
     else if (k === 'h') fitWorld();
     else if (k === 'p') { LF.paused = !LF.paused; renderPanel('livefeed'); toast(LF.paused ? 'Live feed paused' : 'Live feed resumed'); }
-    else if (e.key === 'Escape') openDrawer(false);
+    else if (e.key === 'Escape') { openDrawer(false); document.body.classList.remove('rail-open'); }
   });
 
   new Sortable($('#dock'), {

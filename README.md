@@ -4,6 +4,11 @@ KESTREL is a cyber threat intelligence dashboard that runs locally in your brows
 
 No API keys are needed to get started.
 
+## Features
+
+- **Map view:** a greyscale world map with live threat layers, animated attack paths from top scanning sources to your location, ransomware campaign trails between each group's victims, and day and night shading.
+- **Analytics view:** a threat timeline of CVEs, KEV additions, ransomware victims and advisories, a vulnerability pressure board ranked by EPSS score, an actor and campaign graph, a sector heatmap, a MITRE ATT&CK technique heatmap, and charts for ports, outages and weaknesses.
+
 ## Screenshots
 
 **Map view**
@@ -62,9 +67,9 @@ Some extra panels need a free API key. To add keys, copy `config.example.json` t
 
 ## Data sources
 
-KESTREL uses public data from sources including CISA, NIST NVD, abuse.ch, SANS ISC, ransomware.live, OpenPhish, the Tor Project, IODA and TeleGeography, plus a selection of security news feeds.
+KESTREL uses public data from sources including CISA, NIST NVD, abuse.ch, SANS ISC, ransomware.live, FIRST.org EPSS, OpenPhish, the Tor Project, IODA and TeleGeography, plus a selection of security news feeds.
 
-The data is for general awareness only. Verify any information before acting on it.
+Actor, sector and ATT&CK technique matches are found by keyword matching in news and advisory text, so treat them as leads. The data is for general awareness only. Verify any information before acting on it.
 
 ## Project structure
 
