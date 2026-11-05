@@ -7,9 +7,13 @@ No API keys are needed to get started.
 ## Features
 
 - **Map view:** a greyscale world map with live threat layers, animated attack paths from top scanning sources to your location, ransomware campaign trails between each group's victims, and day and night shading.
+<<<<<<< HEAD
 - **Analytics view:** the threat radar and an industry watch (which sectors are being hit, by whom, and the news behind it) at the top, then a threat timeline of CVEs, KEV additions, ransomware victims and advisories, a vulnerability pressure board ranked by EPSS score, an actor and campaign graph, a sector heatmap, cloud and SaaS outages, and charts for ports, outages and weaknesses.
 - **MITRE ATT&CK view:** the ATT&CK matrix with a rotating technique spotlight, plus kill-chain activity, trending techniques, actors and tagged reports.
 - **Page presets:** buttons in the top bar for Map, Analytics, MITRE, Ransomware, Vulnerabilities, Network and Outages. The extra presets open on the analytics screen (for example `http://127.0.0.1:8788/#ransom`), each keeps its own layout, and **Cycle** can rotate through them for a wall screen (set the interval under Customise).
+=======
+- **Analytics view:** a threat timeline of CVEs, KEV additions, ransomware victims and advisories, a vulnerability pressure board ranked by EPSS score, an actor and campaign graph, a sector heatmap, a MITRE ATT&CK technique heatmap, and charts for ports, outages and weaknesses.
+>>>>>>> 721a6a8afd179ffdd498858410f4f9cfab21789d
 
 ## Screenshots
 

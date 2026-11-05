@@ -730,6 +730,7 @@ def feed_epss():
     return {"items": sorted(out.values(), key=lambda r: -r["epss"]), "candidates": len(ids)}
 
 
+<<<<<<< HEAD
 # ---- Cloud & SaaS provider status (public status pages) ---------------------
 # Each provider is checked on its own, so one slow or broken status page never hides the others.
 # level: "major" = outage (drives the flashing alert), "minor" = degraded / partial, "info" = notice.
@@ -954,6 +955,8 @@ def feed_cloudstatus():
             "unknown": sum(r["state"] == "unknown" for r in res)}
 
 
+=======
+>>>>>>> 721a6a8afd179ffdd498858410f4f9cfab21789d
 # ---- Optional keyed feeds -------------------------------------------------
 def feed_threatfox():
     if not has_key("abusech_auth_key"):
@@ -1049,7 +1052,10 @@ FEEDS = {
     "porthist": (feed_porthist, 6 * 3600, None, "SANS ISC port history"),
     "home": (feed_home, 86400, None, "Observer location"),
     "epss": (feed_epss, 6 * 3600, None, "FIRST.org EPSS"),
+<<<<<<< HEAD
     "cloudstatus": (feed_cloudstatus, 120, None, "Provider status pages"),
+=======
+>>>>>>> 721a6a8afd179ffdd498858410f4f9cfab21789d
 }
 
 
@@ -1253,7 +1259,11 @@ class MitreHandler(Handler):
 
 def prewarm():
     order = ["kev", "ransomware", "c2", "attackers", "outages", "news", "cves", "phishing", "tor", "cables",
+<<<<<<< HEAD
              "threatfox", "urlhaus", "porthist", "home", "epss", "cloudstatus"]
+=======
+             "threatfox", "urlhaus", "porthist", "home", "epss"]
+>>>>>>> 721a6a8afd179ffdd498858410f4f9cfab21789d
     for name in order:
         try:
             build_feed(name)

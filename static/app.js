@@ -37,6 +37,7 @@ function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.ad
 // presets are panel sets shown on the analytics screen (#ransom, #vulns, ...) and switch in place without a reload.
 const SCREEN = ['analytics', 'mitre'].includes(document.body.dataset.screen) ? document.body.dataset.screen : 'face';
 const FACE_PANELS = ['pressure', 'livefeed', 'stream', 'ransomware', 'kev'];
+<<<<<<< HEAD
 const CHART_PANELS = ['tline', 'vulnboard', 'actorgraph', 'sectorheat', 'industries', 'scope', 'kevtrend', 'spider', 'cvetimeline', 'ransomtimeline', 'porttrend', 'outagegantt', 'cwe'];
 const OTHER_PANELS = ['cves', 'attackers', 'ports', 'hotspots', 'c2', 'phishing', 'outages', 'news', 'investigate'];
 const KEYED_PANELS = ['threatfox', 'urlhaus'];
@@ -54,6 +55,25 @@ const ICON = {
   network: '<circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 11l10-5M7 13l10 5M19 7v10"/>',
   outages: '<path d="M2 12h4l2.5-6 4 12 2.5-6H22"/>',
   cycle: '<path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3M18 3v4h-4M6 21v-4h4"/>',
+=======
+const CHART_PANELS = ['tline', 'vulnboard', 'actorgraph', 'sectorheat', 'attackmx', 'scope', 'kevtrend', 'spider', 'cvetimeline', 'ransomtimeline', 'porttrend', 'outagegantt', 'cwe'];
+const OTHER_PANELS = ['cves', 'attackers', 'ports', 'hotspots', 'c2', 'phishing', 'outages', 'news', 'investigate'];
+const KEYED_PANELS = ['threatfox', 'urlhaus'];
+const PANEL_IDS = SCREEN === 'face'
+  ? [...FACE_PANELS, ...OTHER_PANELS, ...KEYED_PANELS, ...CHART_PANELS]
+  : [...CHART_PANELS, ...OTHER_PANELS, ...FACE_PANELS, ...KEYED_PANELS];
+const SHOWN = SCREEN === 'face' ? FACE_PANELS : [...CHART_PANELS, ...OTHER_PANELS];
+const DEFAULTS = {
+  layout: 'right', cols: SCREEN === 'face' ? 2 : 4, dockW: 620, dockH: 340, ticker: true, rail: true, compact: false, theme: 'obsidian', pings: true,
+  base: 'satellite', labels: true, refresh: 5, layerCollapsed: false, kpiCollapsed: false, railMin: false,
+  order: PANEL_IDS.slice(),
+  hidden: Object.fromEntries(PANEL_IDS.filter(id => !SHOWN.includes(id)).map(id => [id, true])),
+  collapsed: {},
+  wide: SCREEN === 'face' ? { pressure: true, livefeed: true, stream: true, news: true, cves: true }
+    : { tline: true, vulnboard: true, actorgraph: true, sectorheat: true, attackmx: true, scope: true, kevtrend: true, cvetimeline: true, porttrend: true, news: true, cves: true },
+  layers: { ransomware: true, c2: true, attackers: true, compromised: true, phishing: true, tor: false, threatfox: true, urlhaus: true, outages: true, heat: false, cables: true, paths: true, trails: true, night: true },
+  pstate: {},
+>>>>>>> 721a6a8afd179ffdd498858410f4f9cfab21789d
 };
 const VIEWS = [
   { id: 'face', label: 'Map', screen: 'face', title: 'Live map, Threat Pressure Index and live threat feed' },
@@ -185,7 +205,11 @@ setInterval(() => {
 }, 1000);
 
 /* ------------------------------------------------------------------- data */
+<<<<<<< HEAD
 const FEEDS = ['cloudstatus', 'kev', 'ransomware', 'attackers', 'c2', 'outages', 'news', 'cves', 'phishing', 'tor', 'threatfox', 'urlhaus', 'home', 'porthist', 'epss'];
+=======
+const FEEDS = ['kev', 'ransomware', 'attackers', 'c2', 'outages', 'news', 'cves', 'phishing', 'tor', 'threatfox', 'urlhaus', 'home', 'porthist', 'epss'];
+>>>>>>> 721a6a8afd179ffdd498858410f4f9cfab21789d
 const GEO_FEEDS = ['c2', 'attackers', 'phishing', 'tor', 'threatfox', 'urlhaus'];
 const D = {}, META = {};
 let STATUS = null, INV = null;

@@ -600,6 +600,7 @@ window.EXTRA_PANELS.push(
     render() {
       const { C, ex, docs, kevN } = attackCounts();
       const max = Math.max(...Object.values(C), 1);
+<<<<<<< HEAD
       const recent = mxRecent(), prev = mxPrev.C;
       mxPrev.C = C;
       const cols = TACTICS.map(([tac, techs], ti) => {
@@ -613,6 +614,18 @@ window.EXTRA_PANELS.push(
       }).join('');
       return `<div class="mx-spot" aria-live="off">${mxSpotHTML()}</div><div class="mx-wrap"><div class="mx">${cols}</div></div>
         <div class="disclaim">Scanned ${docs} news and advisory reports plus ${kevN} KEV entries from the last 30 days. Techniques are matched from keywords and explicit ATT&CK IDs, so this shows emphasis, not confirmed attribution. A dot marks techniques reported in the last 48 hours; the spotlight steps through the most-reported techniques. Click a cell to open it on attack.mitre.org.</div>`;
+=======
+      const cols = TACTICS.map(([tac, techs]) => {
+        const tot = techs.reduce((a, [id]) => a + (C[id] || 0), 0);
+        const cells = techs.slice().sort((a, b) => (C[b[0]] || 0) - (C[a[0]] || 0)).map(([id, name]) => {
+          const n = C[id] || 0, f = Math.sqrt(n / max);
+          return `<div class="mx-cell ${n ? 'on' : ''}" style="${n ? `background:${rgbaAcc(0.1 + f * 0.75)};color:${f > 0.55 ? 'var(--acc-ink)' : 'var(--text)'}` : ''}" data-open="https://attack.mitre.org/techniques/${id.replace('.', '/')}/" ${tip(`${id} · ${name}\n${n} report${n === 1 ? '' : 's'}${ex[id] ? '\n• ' + ex[id].join('\n• ') : ''}`)}><span>${esc(name)}</span><em>${n || ''}</em></div>`;
+        }).join('');
+        return `<div class="mx-col"><div class="mx-h ${tot ? 'on' : ''}"><span>${esc(tac)}</span><em>${tot}</em></div>${cells}</div>`;
+      }).join('');
+      return `<div class="mx-wrap"><div class="mx">${cols}</div></div>
+        <div class="disclaim">Scanned ${docs} news and advisory reports plus ${kevN} KEV entries from the last 30 days. Techniques are matched from keywords and explicit ATT&CK IDs, so this shows emphasis, not confirmed attribution. Click a cell to open it on attack.mitre.org.</div>`;
+>>>>>>> 721a6a8afd179ffdd498858410f4f9cfab21789d
     },
   },
 );
@@ -634,6 +647,7 @@ document.addEventListener('mouseover', e => {
     svg.querySelector(`.ag-n[data-id="${CSS.escape(other)}"]`)?.classList.add('hl');
   });
 });
+<<<<<<< HEAD
 
 /* ======================================================================= cloud & SaaS status
  * Public status pages of the big cloud, identity and SaaS providers (backend feed "cloudstatus").
@@ -956,3 +970,5 @@ window.EXTRA_PANELS.push({
       <div class="disclaim">Victims are ransomware leak-site posts in the last 4 days grouped by the victim's industry${unk ? ` (${unk} posts had no usable industry)` : ''}; bars are 12-hour blocks, newest on the right, and the arrow compares the last 24 hours with the 24 before. News counts reports that name the industry. Click a card for its detail.</div>`;
   },
 });
+=======
+>>>>>>> 721a6a8afd179ffdd498858410f4f9cfab21789d
