@@ -20,9 +20,9 @@
     <span class="name">KESTREL</span><span class="sub">Analytics</span>
   </div>
   <div id="levelPill" class="level" data-goto="pressure" title="Threat Pressure Index"><span class="lv-dot"></span><span class="lv-txt">—</span><span class="lv-num"></span></div>
+  <nav id="views" class="views" aria-label="Pages"><a class="vw" data-to="face" href="http://127.0.0.1:8787/" target="kestrel-map" title="Map"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg><span>Map</span></a><a class="vw" data-to="analytics" href="http://127.0.0.1:8788/" target="kestrel-analytics" title="Analytics"><svg viewBox="0 0 24 24"><path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/></svg><span>Analytics</span></a><a class="vw" data-to="mitre" href="http://127.0.0.1:8789/" target="kestrel-mitre" title="MITRE ATT&amp;CK"><svg viewBox="0 0 24 24"><path d="M3 4h5v5H3zM10 4h5v5h-5zM17 4h4v5h-4zM3 11h5v4H3zM10 11h5v4h-5zM3 17h5v3H3z"/></svg><span>MITRE</span></a></nav>
   <div class="tb-right">
     <form id="searchForm" autocomplete="off"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.5-4.5"/></svg><input id="search" placeholder="Investigate IP, CVE or keyword" spellcheck="false"><kbd>/</kbd></form>
-    <a class="screen-link" id="screenLink" href="http://127.0.0.1:8787/" target="kestrel-map" title="Open screen 1 (map)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/></svg>Map</a>
     <div class="clock"><span id="clock">--:--:--</span> UTC</div>
     <button class="icon-btn" id="btnRefresh" title="Refresh all feeds (R)"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v5h-5"/></svg></button>
     <button class="icon-btn" id="btnFocus" title="Map focus mode (F)"><svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
@@ -81,6 +81,7 @@
       <label class="row">Place labels <input type="checkbox" id="chkLabels"></label>
     </section>
     <section><h4>Refresh</h4>
+      <label class="row" id="rowCycle">Cycle presets every <select id="selCycle"><option value="0">Off</option><option value="1">1 min</option><option value="2">2 min</option><option value="5">5 min</option><option value="10">10 min</option></select></label>
       <label class="row">Poll interval <select id="selRefresh"><option value="2">2 min</option><option value="5">5 min</option><option value="10">10 min</option><option value="30">30 min</option></select></label>
     </section>
     <section><h4>Panels <small>drag a panel's grip to reorder</small></h4><div id="panelToggles"></div></section>

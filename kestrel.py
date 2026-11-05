@@ -669,10 +669,11 @@ def _one_news(src, url):
         link = _strip(tag("link"))
         if not title or not link.startswith("http"):
             continue
-        desc = _strip(tag("description"))[:260]
-        out.append({"source": src, "title": title, "link": link, "summary": desc,
+        full = _strip(tag("description"))
+        desc = full[:260]
+        out.append({"source": src, "title": title, "link": link, "summary": desc, "text": full[:1500],
                     "published": parse_dt(_strip(tag("pubDate")) or _strip(tag("dc:date"))),
-                    "cves": sorted(set(re.findall(r"CVE-\d{4}-\d{4,7}", title + " " + desc)))[:4],
+                    "cves": sorted(set(re.findall(r"CVE-\d{4}-\d{4,7}", title + " " + full[:1500])))[:8],
                     "tags": _tag(title + " " + desc)})
     return out
 
@@ -690,6 +691,267 @@ def feed_news():
         raise IOError("all news feeds failed: %s" % errors)
     items.sort(key=lambda x: x["published"] or "", reverse=True)
     return {"items": items[:120], "errors": errors, "sources": [s for s, _ in NEWS_FEEDS]}
+
+
+# ---- EPSS scores for the CVEs KESTREL is already tracking -------------------
+def _feed_data(name):
+    fn, ttl, _, _ = FEEDS[name]
+    try:
+        return CACHE.get(name, ttl, fn)["data"]
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def feed_epss():
+    """FIRST.org EPSS (exploit prediction) for recent KEV entries, critical CVEs and CVEs in the news."""
+    kev, cves, news = _feed_data("kev"), _feed_data("cves"), _feed_data("news")
+    cand = []
+    for n in news.get("items", []):
+        cand += n.get("cves", [])
+    cand += [k["cve"] for k in kev.get("items", [])[:40]]
+    scored = sorted([c for c in cves.get("items", []) if c.get("score")], key=lambda c: -c["score"])
+    cand += [c["id"] for c in scored[:40]]
+    seen, ids = set(), []
+    for c in cand:
+        if c not in seen:
+            seen.add(c)
+            ids.append(c)
+    ids = ids[:120]
+    out = {}
+    for i in range(0, len(ids), 40):
+        chunk = ids[i:i + 40]
+        d = get_json("https://api.first.org/data/v1/epss?scope=time-series&cve=" + ",".join(chunk), timeout=40)
+        for r in d.get("data", []):
+            series = [{"date": t.get("date"), "epss": float(t.get("epss") or 0)} for t in (r.get("time-series") or [])]
+            series.sort(key=lambda t: t["date"] or "")
+            out[r["cve"]] = {"cve": r["cve"], "epss": float(r.get("epss") or 0),
+                             "percentile": float(r.get("percentile") or 0), "date": r.get("date"),
+                             "series": [t["epss"] for t in series][-30:]}
+    return {"items": sorted(out.values(), key=lambda r: -r["epss"]), "candidates": len(ids)}
+
+
+# ---- Cloud & SaaS provider status (public status pages) ---------------------
+# Each provider is checked on its own, so one slow or broken status page never hides the others.
+# level: "major" = outage (drives the flashing alert), "minor" = degraded / partial, "info" = notice.
+STATUSPAGE = "statuspage"  # Atlassian Statuspage summary.json, used by many providers
+CLOUD_SERVICES = [
+    # id, name, kind, api url, public page
+    ("aws", "AWS", "aws", "https://health.aws.amazon.com/public/currentevents", "https://health.aws.amazon.com/health/status"),
+    ("azure", "Microsoft Azure", "rss", "https://azure.status.microsoft/en-us/status/feed/", "https://azure.status.microsoft/en-us/status"),
+    ("m365", "Microsoft 365", "m365", "https://status.cloud.microsoft/api/posts/m365Consumer", "https://status.cloud.microsoft/"),
+    ("gcp", "Google Cloud", "google", "https://status.cloud.google.com/incidents.json", "https://status.cloud.google.com/"),
+    ("gws", "Google Workspace", "google", "https://www.google.com/appsstatus/dashboard/incidents.json", "https://www.google.com/appsstatus/dashboard/"),
+    ("cloudflare", "Cloudflare", STATUSPAGE, "https://www.cloudflarestatus.com/api/v2/summary.json", "https://www.cloudflarestatus.com/"),
+    ("okta", "Okta", "okta", "https://feeds.feedburner.com/OktaTrustRSS", "https://status.okta.com/"),
+    ("github", "GitHub", STATUSPAGE, "https://www.githubstatus.com/api/v2/summary.json", "https://www.githubstatus.com/"),
+    ("slack", "Slack", "slack", "https://slack-status.com/api/v2.0.0/current", "https://slack-status.com/"),
+    ("zoom", "Zoom", STATUSPAGE, "https://status.zoom.us/api/v2/summary.json", "https://status.zoom.us/"),
+    ("atlassian", "Atlassian", STATUSPAGE, "https://status.atlassian.com/api/v2/summary.json", "https://status.atlassian.com/"),
+    ("fastly", "Fastly", STATUSPAGE, "https://www.fastlystatus.com/api/v2/summary.json", "https://www.fastlystatus.com/"),
+    ("akamai", "Akamai", STATUSPAGE, "https://www.akamaistatus.com/api/v2/summary.json", "https://www.akamaistatus.com/"),
+    ("datadog", "Datadog", STATUSPAGE, "https://status.datadoghq.com/api/v2/summary.json", "https://status.datadoghq.com/"),
+]
+LONG_RUNNING_H = 72  # incidents older than this stay listed but no longer flash the alert
+
+
+def _ts(v):
+    """Epoch seconds/ms or a date string -> ISO 8601 UTC (or None)."""
+    if v in (None, ""):
+        return None
+    try:
+        n = float(v)
+        return iso(datetime.fromtimestamp(n / 1000 if n > 1e11 else n, timezone.utc))
+    except (TypeError, ValueError):
+        return parse_dt(str(v))
+
+
+def _cs_statuspage(url):
+    d = get_json(url, timeout=20)
+    out = []
+    for i in d.get("incidents") or []:
+        if i.get("status") in ("resolved", "postmortem"):
+            continue
+        imp = i.get("impact") or "none"
+        out.append({"id": i.get("id"), "title": i.get("name") or "Incident",
+                    "level": "major" if imp in ("major", "critical") else "minor" if imp == "minor" else "info",
+                    "status": i.get("status"), "started": _ts(i.get("started_at") or i.get("created_at")),
+                    "updated": _ts(i.get("updated_at")), "url": i.get("shortlink"),
+                    "detail": _strip(((i.get("incident_updates") or [{}])[0]).get("body"))[:300],
+                    "components": [c.get("name") for c in (i.get("components") or [])][:6]})
+    bad = [c for c in d.get("components") or [] if c.get("status") in ("major_outage", "partial_outage", "degraded_performance")
+           and not c.get("group")]
+    for c in bad:
+        if any(c.get("name") in x["components"] for x in out):
+            continue
+        out.append({"id": "c-" + str(c.get("id")), "title": "%s: %s" % (c.get("name"), c.get("status", "").replace("_", " ")),
+                    "level": "major" if c.get("status") == "major_outage" else "minor", "status": c.get("status"),
+                    "started": _ts(c.get("updated_at")), "updated": _ts(c.get("updated_at")), "url": None, "detail": "",
+                    "components": [c.get("name")]})
+    return out
+
+
+def _cs_aws(url):
+    raw = http_get(url, timeout=25)
+    txt = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig", "replace")
+    out = []
+    for e in json.loads(txt or "[]"):
+        cur = [int(s.get("current") or 0) for s in (e.get("impacted_services") or {}).values()]
+        st = max(cur) if cur else int(e.get("status") or 0)
+        if st <= 0:
+            continue
+        log = sorted(e.get("event_log") or [], key=lambda x: x.get("timestamp") or 0)
+        svcs = [s.get("service_name") for s in (e.get("impacted_services") or {}).values() if int(s.get("current") or 0) > 0]
+        out.append({"id": e.get("arn") or e.get("service"), "title": "%s · %s%s" % (e.get("service_name") or e.get("service"),
+                    e.get("summary") or "Service event", (" (" + e["region_name"] + ")") if e.get("region_name") else ""),
+                    "level": "major" if st >= 3 else "minor" if st == 2 else "info", "status": str(st),
+                    "started": _ts(e.get("date")), "updated": _ts(log[-1].get("timestamp")) if log else _ts(e.get("date")),
+                    "url": None, "detail": _strip(log[-1].get("message"))[:300] if log else "", "components": svcs[:6]})
+    return out
+
+
+def _cs_google(url):
+    out = []
+    for i in get_json(url, timeout=25):
+        if i.get("end"):
+            continue
+        imp = i.get("status_impact") or ""
+        upd = i.get("most_recent_update") or {}
+        out.append({"id": i.get("id"), "title": i.get("external_desc") or "Incident",
+                    "level": "major" if imp == "SERVICE_OUTAGE" or i.get("severity") == "high" else
+                             "minor" if imp == "SERVICE_DISRUPTION" else "info",
+                    "status": upd.get("status") or imp, "started": _ts(i.get("begin")), "updated": _ts(i.get("modified")),
+                    "url": ("https://status.cloud.google.com/" + i["uri"]) if "cloud.google" in url and i.get("uri") else None,
+                    "detail": _strip(upd.get("text"))[:300],
+                    "components": [p.get("title") for p in (i.get("affected_products") or [])][:6]})
+    return out
+
+
+def _cs_rss(url):
+    """Azure: the feed only carries items while an incident is open."""
+    raw = http_get(url, timeout=20).decode("utf8", "replace")
+    out = []
+    for m in re.finditer(r"<item\b.*?</item>", raw, re.S):
+        blk = m.group(0)
+        g = lambda n: _strip((re.search(r"<%s\b[^>]*>(.*?)</%s>" % (n, n), blk, re.S) or [None, ""])[1])  # noqa: E731
+        title, when = g("title"), parse_dt(g("pubDate"))
+        if not title or re.search(r"\b(resolved|mitigated|post incident review|\bPIR\b)", title, re.I):
+            continue
+        out.append({"id": g("guid") or title, "title": title,
+                    "level": "minor" if re.search(r"degrad|intermittent|delay|latency|some customers", title, re.I) else "major",
+                    "status": "active", "started": when, "updated": when, "url": g("link") or None,
+                    "detail": g("description")[:300], "components": []})
+    return out
+
+
+def _cs_okta(url):
+    raw = http_get(url, timeout=20).decode("utf8", "replace")
+    out = []
+    cut = now_utc() - timedelta(hours=48)
+    for m in re.finditer(r"<entry\b.*?</entry>", raw, re.S):
+        blk = m.group(0)
+        g = lambda n: _strip((re.search(r"<%s\b[^>]*>(.*?)</%s>" % (n, n), blk, re.S) or [None, ""])[1])  # noqa: E731
+        title, when = g("title"), parse_dt(g("updated"))
+        if not title or title.lower().startswith("resolved") or not when or when < iso(cut):
+            continue
+        link = re.search(r'<link[^>]*href="([^"]+)"', blk)
+        out.append({"id": g("id") or title, "title": title,
+                    "level": "major" if re.search(r"service disruption|outage", title, re.I) else "minor",
+                    "status": "active", "started": when, "updated": when, "url": link and link.group(1),
+                    "detail": g("content")[:300], "components": []})
+    return out
+
+
+def _cs_slack(url):
+    d = get_json(url, timeout=20)
+    out = []
+    for i in d.get("active_incidents") or []:
+        typ = i.get("type") or "incident"
+        out.append({"id": str(i.get("id")), "title": i.get("title") or "Incident",
+                    "level": "major" if typ == "outage" else "minor" if typ == "incident" else "info",
+                    "status": i.get("status"), "started": _ts(i.get("date_created")), "updated": _ts(i.get("date_updated")),
+                    "url": i.get("url"), "detail": "", "components": (i.get("services") or [])[:6]})
+    return out
+
+
+def _cs_m365(url):
+    out = []
+    for p in get_json(url, timeout=20):
+        st = p.get("Status") or ""
+        if not st or st.lower() in ("operational", "serviceoperational", "resolved", "servicerestored"):
+            continue
+        out.append({"id": p.get("Id") or p.get("ServiceWorkloadName"), "title": "%s: %s" % (p.get("ServiceDisplayName"), p.get("Title") or st),
+                    "level": "major" if re.search(r"interrupt|outage|down|unavailable", st, re.I) else "minor",
+                    "status": st, "started": _ts(p.get("AuthoredDateTime")), "updated": _ts(p.get("LastUpdatedTime")),
+                    "url": None, "detail": _strip(p.get("Message"))[:300], "components": [p.get("ServiceDisplayName")]})
+    # Optional: your own tenant's service health through Microsoft Graph (an app with ServiceHealth.Read.All)
+    if has_key("m365_tenant_id") and has_key("m365_client_id") and has_key("m365_client_secret"):
+        tok = get_json("https://login.microsoftonline.com/%s/oauth2/v2.0/token" % CONFIG["m365_tenant_id"], timeout=20,
+                       data=urllib.parse.urlencode({"client_id": CONFIG["m365_client_id"], "client_secret": CONFIG["m365_client_secret"],
+                                                    "scope": "https://graph.microsoft.com/.default", "grant_type": "client_credentials"}),
+                       headers={"Content-Type": "application/x-www-form-urlencoded"})["access_token"]
+        d = get_json("https://graph.microsoft.com/v1.0/admin/serviceAnnouncement/issues?$filter=isResolved eq false&$top=50",
+                     headers={"Authorization": "Bearer " + tok}, timeout=25)
+        for i in d.get("value") or []:
+            out.append({"id": i.get("id"), "title": "%s: %s" % (i.get("service"), i.get("title")),
+                        "level": "major" if i.get("classification") == "incident" else "minor",
+                        "status": i.get("status"), "started": _ts(i.get("startDateTime")), "updated": _ts(i.get("lastModifiedDateTime")),
+                        "url": "https://admin.microsoft.com/#/servicehealth/:/alerts/" + str(i.get("id")),
+                        "detail": _strip(i.get("impactDescription"))[:300], "components": [i.get("feature") or i.get("service")]})
+    return out
+
+
+CS_KIND = {STATUSPAGE: _cs_statuspage, "aws": _cs_aws, "google": _cs_google, "rss": _cs_rss, "okta": _cs_okta,
+           "slack": _cs_slack, "m365": _cs_m365}
+
+
+def _cloud_services():
+    svcs = list(CLOUD_SERVICES)
+    # extra Statuspage providers from config.json: "status_pages": {"Name": "https://status.example.com"}
+    try:
+        extra = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8")).get("status_pages") or {}
+    except Exception:  # noqa: BLE001
+        extra = {}
+    for name, base in extra.items():
+        base = str(base).rstrip("/")
+        api = base if base.endswith(".json") else base + "/api/v2/summary.json"
+        svcs.append((re.sub(r"\W+", "-", name.lower()), name, STATUSPAGE, api, base.split("/api/")[0] + "/"))
+    return svcs
+
+
+def _cs_one(svc):
+    sid, name, kind, api, page = svc
+    try:
+        inc = CS_KIND[kind](api)
+        err = None
+    except Exception as e:  # noqa: BLE001
+        inc, err = [], str(e)[:160]
+    now = now_utc()
+    for i in inc:
+        i["url"] = i.get("url") or page
+        try:
+            age_h = (now - datetime.strptime(i["started"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)).total_seconds() / 3600
+        except Exception:  # noqa: BLE001
+            age_h = 0
+        i["longRunning"] = age_h > LONG_RUNNING_H
+    # a months-long regional event shouldn't paint the provider red forever: it counts as degraded
+    lv = ["minor" if i["level"] == "major" and i["longRunning"] else i["level"] for i in inc]
+    state = "unknown" if err else "major" if "major" in lv else "minor" if "minor" in lv else "ok"
+    inc.sort(key=lambda i: ({"major": 0, "minor": 1}.get(i["level"], 2), i.get("started") or ""))
+    return {"id": sid, "name": name, "page": page, "state": state, "incidents": inc[:12], "error": err}
+
+
+def feed_cloudstatus():
+    svcs = _cloud_services()
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        res = list(ex.map(_cs_one, svcs))
+    if all(r["error"] for r in res):
+        raise IOError("no status page could be reached: %s" % res[0]["error"])
+    alerts = [{"key": "%s|%s" % (r["id"], i["id"]), "service": r["name"], "title": i["title"], "started": i["started"],
+               "url": i["url"], "level": i["level"]}
+              for r in res for i in r["incidents"] if i["level"] == "major" and not i["longRunning"]]
+    return {"services": res, "alerts": alerts, "checked": iso(now_utc()),
+            "major": sum(r["state"] == "major" for r in res), "minor": sum(r["state"] == "minor" for r in res),
+            "unknown": sum(r["state"] == "unknown" for r in res)}
 
 
 # ---- Optional keyed feeds -------------------------------------------------
@@ -786,6 +1048,8 @@ FEEDS = {
     "urlhaus": (feed_urlhaus, 1800, "ip", "abuse.ch URLhaus (key)"),
     "porthist": (feed_porthist, 6 * 3600, None, "SANS ISC port history"),
     "home": (feed_home, 86400, None, "Observer location"),
+    "epss": (feed_epss, 6 * 3600, None, "FIRST.org EPSS"),
+    "cloudstatus": (feed_cloudstatus, 120, None, "Provider status pages"),
 }
 
 
@@ -978,9 +1242,18 @@ class AnalyticsHandler(Handler):
         return super().do_GET()
 
 
+class MitreHandler(Handler):
+    """Screen 3: same API and assets, but / serves the MITRE ATT&CK page."""
+
+    def do_GET(self):
+        if urllib.parse.urlsplit(self.path).path in ("/", "/index.html"):
+            self.path = "/mitre.html"
+        return super().do_GET()
+
+
 def prewarm():
     order = ["kev", "ransomware", "c2", "attackers", "outages", "news", "cves", "phishing", "tor", "cables",
-             "threatfox", "urlhaus", "porthist", "home"]
+             "threatfox", "urlhaus", "porthist", "home", "epss", "cloudstatus"]
     for name in order:
         try:
             build_feed(name)
@@ -995,11 +1268,13 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("KESTREL_PORT", "8787")))
     ap.add_argument("--analytics-port", type=int, default=int(os.environ.get("KESTREL_ANALYTICS_PORT", "8788")),
                     help="port for screen 2 (analytics); 0 disables it")
+    ap.add_argument("--mitre-port", type=int, default=int(os.environ.get("KESTREL_MITRE_PORT", "8789")),
+                    help="port for screen 3 (MITRE ATT&CK); 0 disables it")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
-    PORTS.update(face=args.port, analytics=args.analytics_port or None)
+    PORTS.update(face=args.port, analytics=args.analytics_port or None, mitre=args.mitre_port or None)
     shown = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
     url = "http://%s:%d/" % (shown, args.port)
     if args.analytics_port:
@@ -1007,6 +1282,11 @@ def main():
         asrv.daemon_threads = True
         threading.Thread(target=asrv.serve_forever, daemon=True, name="analytics").start()
         url += "   analytics: http://%s:%d/" % (shown, args.analytics_port)
+    if args.mitre_port:
+        msrv = ThreadingHTTPServer((args.host, args.mitre_port), MitreHandler)
+        msrv.daemon_threads = True
+        threading.Thread(target=msrv.serve_forever, daemon=True, name="mitre").start()
+        url += "   mitre: http://%s:%d/" % (shown, args.mitre_port)
     print(r"""
    _  _______ ___ _____ ___ ___ _
   | |/ / ____/ __|_   _| _ \ __| |      Cyber Threat Observatory
