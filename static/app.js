@@ -12,6 +12,9 @@ const fmtN = n => n == null ? '—' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n 
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const IP_RX = /^(\d{1,3}\.){3}\d{1,3}$|^[0-9a-f:]+:[0-9a-f:]*$/i;
 const CVE_RX = /^CVE-\d{4}-\d{4,7}$/i;
+// Phones get a single scrolling page (see the max-width: 760px block in style.css)
+const PHONE_MQ = matchMedia('(max-width: 760px)');
+const isPhone = () => PHONE_MQ.matches;
 function ago(iso) {
   if (!iso) return '—';
   const s = (Date.now() - Date.parse(iso)) / 1000;
@@ -28,29 +31,74 @@ const loc = g => g ? [g.city, g.country].filter(Boolean).join(', ') + (g.approx 
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 2600); }
 
 /* --------------------------------------------------------------- settings */
-// Two screens share this code: the map "face" (port 8787) and "analytics" (port 8788, no map).
-// Every panel exists on both; each screen just shows a different set by default.
-const SCREEN = document.body.dataset.screen === 'analytics' ? 'analytics' : 'face';
-const FACE_PANELS = ['pressure', 'livefeed', 'stream', 'ransomware', 'kev'];
-const CHART_PANELS = ['scope', 'kevtrend', 'spider', 'cvetimeline', 'ransomtimeline', 'porttrend', 'outagegantt', 'cwe'];
-const OTHER_PANELS = ['cves', 'attackers', 'ports', 'hotspots', 'c2', 'phishing', 'outages', 'news', 'investigate'];
-const KEYED_PANELS = ['threatfox', 'urlhaus'];
-const PANEL_IDS = SCREEN === 'face'
-  ? [...FACE_PANELS, ...OTHER_PANELS, ...KEYED_PANELS, ...CHART_PANELS]
-  : [...CHART_PANELS, ...OTHER_PANELS, ...FACE_PANELS, ...KEYED_PANELS];
-const SHOWN = SCREEN === 'face' ? FACE_PANELS : [...CHART_PANELS, ...OTHER_PANELS];
-const DEFAULTS = {
-  layout: 'right', cols: SCREEN === 'face' ? 2 : 4, dockW: 620, dockH: 340, ticker: true, rail: true, compact: false, theme: 'obsidian', pings: true,
-  base: 'satellite', labels: true, refresh: 5, layerCollapsed: false, kpiCollapsed: false, railMin: false,
-  order: PANEL_IDS.slice(),
-  hidden: Object.fromEntries(PANEL_IDS.filter(id => !SHOWN.includes(id)).map(id => [id, true])),
-  collapsed: {},
-  wide: SCREEN === 'face' ? { pressure: true, livefeed: true, stream: true, news: true, cves: true }
-    : { scope: true, kevtrend: true, cvetimeline: true, porttrend: true, news: true, cves: true },
-  layers: { ransomware: true, c2: true, attackers: true, compromised: true, phishing: true, tor: false, threatfox: true, urlhaus: true, outages: true, heat: false, cables: true },
-  pstate: {},
+// Three screens share this code: the map "face" (port 8787), "analytics" (port 8788, no map)
+// and "mitre" (port 8789, MITRE ATT&CK only). Every panel exists on all of them; each screen just shows a different set by default.
+// The page buttons in the top bar are presets ("views"). Map, Analytics and MITRE are the three screens; the other
+// presets are panel sets shown on the analytics screen (#ransom, #vulns, ...) and switch in place without a reload.
+const SCREEN = ['analytics', 'mitre'].includes(document.body.dataset.screen) ? document.body.dataset.screen : 'face';
+// Map screen (2026-11-08): just the map, the Threat Pressure Index and a full-height Live Threat Feed.
+// Latest Events, Ransomware and KEV moved off it; they can still be switched back on under Customise.
+const FACE_PANELS = ['pressure', 'livefeed'];
+const FACE_EXTRA = ['stream', 'ransomware', 'kev'];
+const CHART_PANELS = ['threatclock', 'flow', 'barrace', 'tline', 'vulnboard', 'actorgraph', 'sectorheat', 'industries', 'kevtrend', 'spider', 'cvetimeline', 'ransomtimeline', 'porttrend', 'outagegantt', 'cwe'];
+const OTHER_PANELS = ['cves', 'attackers', 'ports', 'hotspots', 'c2', 'phishing', 'outages', 'news'];
+const IOC_PANELS = ['threatfox', 'urlhaus'];
+const MITRE_PANELS = ['attackmx', 'mtactics', 'mttop', 'mttrend', 'mtactors', 'mtkev', 'mtfeed'];
+const ALL_PANELS = [...FACE_PANELS, ...FACE_EXTRA, ...OTHER_PANELS, ...IOC_PANELS, ...CHART_PANELS, 'saas', ...MITRE_PANELS];
+// analytics: the threat clock, ransomware flow and country race lead (they replaced the distance radar on
+// 2026-11-15), then the industry panels; everything else follows
+const ANALYTICS_TOP = ['threatclock', 'flow', 'barrace', 'industries', 'sectorheat'];
+const ANALYTICS_PANELS = [...ANALYTICS_TOP, 'saas', ...CHART_PANELS.filter(id => !ANALYTICS_TOP.includes(id)), ...OTHER_PANELS];
+const ICON = {
+  face: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3.5 3 14.5 0 18M12 3c-3 3.5-3 14.5 0 18"/>',
+  analytics: '<path d="M4 19V9M10 19V5M16 19v-7M22 19H2"/>',
+  mitre: '<path d="M3 4h5v5H3zM10 4h5v5h-5zM17 4h4v5h-4zM3 11h5v4H3zM10 11h5v4h-5zM3 17h5v3H3z"/>',
+  ransom: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3M12 15v2"/>',
+  vulns: '<path d="M12 3l8 3v6c0 4.5-3.4 8-8 9-4.6-1-8-4.5-8-9V6z"/><path d="M12 8v5M12 16v.5"/>',
+  network: '<circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 11l10-5M7 13l10 5M19 7v10"/>',
+  outages: '<path d="M2 12h4l2.5-6 4 12 2.5-6H22"/>',
+  cycle: '<path d="M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3M18 3v4h-4M6 21v-4h4"/>',
 };
-const LS_KEY = 'kestrel.settings.v2';
+const VIEWS = [
+  { id: 'face', label: 'Map', screen: 'face', title: 'Live map, Threat Pressure Index and live threat feed' },
+  { id: 'analytics', label: 'Analytics', screen: 'analytics', title: 'Threat clock, ransomware flow, country race, industry targeting and every chart' },
+  { id: 'mitre', label: 'MITRE', screen: 'mitre', title: 'MITRE ATT&CK matrix, kill chain and trending techniques' },
+  { id: 'ransom', label: 'Ransomware', screen: 'analytics', cols: 3, title: 'Leak-site claims, who is being hit and the groups behind it',
+    panels: ['flow', 'ransomtimeline', 'ransomware', 'sectorheat', 'industries', 'actorgraph', 'news'], wide: ['flow', 'ransomtimeline', 'sectorheat', 'actorgraph'] },
+  { id: 'vulns', label: 'Vulnerabilities', screen: 'analytics', cols: 3, title: 'Exploited and newly published vulnerabilities',
+    panels: ['vulnboard', 'kev', 'kevtrend', 'cvetimeline', 'cwe', 'cves', 'mtkev'], wide: ['vulnboard', 'cves'] },
+  { id: 'network', label: 'Network', screen: 'analytics', cols: 3, title: 'Hostile infrastructure: scanners, C2, phishing and targeted ports',
+    panels: ['barrace', 'threatclock', 'hotspots', 'porttrend', 'ports', 'attackers', 'c2', 'phishing', 'spider'], wide: ['porttrend'] },
+  { id: 'outages', label: 'Outages', screen: 'analytics', cols: 2, title: 'Cloud and SaaS provider outages and internet outages',
+    panels: ['saas', 'outagegantt', 'outages', 'stream'], wide: ['saas', 'outagegantt'] },
+];
+const VIEW_BY = Object.fromEntries(VIEWS.map(v => [v.id, v]));
+// a preset in the address bar (#ransom) only counts on the screen that hosts it
+const hashView = () => { const v = VIEW_BY[decodeURIComponent(location.hash.slice(1))]; return v && v.screen === SCREEN ? v.id : SCREEN; };
+let VIEW, PANEL_IDS, SHOWN, DEFAULTS, LS_KEY;
+function viewConfig(view) {
+  VIEW = view;
+  const V = VIEW_BY[view];
+  SHOWN = V.panels || (SCREEN === 'face' ? FACE_PANELS : SCREEN === 'mitre' ? MITRE_PANELS : ANALYTICS_PANELS);
+  PANEL_IDS = [...SHOWN, ...ALL_PANELS.filter(id => !SHOWN.includes(id))];
+  DEFAULTS = {
+    layout: 'right', cols: V.cols || (SCREEN === 'face' ? 2 : SCREEN === 'mitre' ? 3 : 4), dockW: 620, dockH: 340, ticker: true, rail: true, compact: false, theme: 'obsidian', pings: true,
+    base: 'outline', labels: true, refresh: 5, layerCollapsed: false, kpiCollapsed: false, railMin: false,
+    order: PANEL_IDS.slice(),
+    hidden: Object.fromEntries(PANEL_IDS.filter(id => !SHOWN.includes(id)).map(id => [id, true])),
+    collapsed: {},
+    wide: V.wide ? Object.fromEntries(V.wide.map(id => [id, true]))
+      : SCREEN === 'face' ? { news: true, cves: true }
+      : SCREEN === 'mitre' ? { attackmx: true, mttrend: true, mtfeed: true }
+      : { saas: true, tline: true, vulnboard: true, actorgraph: true, sectorheat: true, industries: true, attackmx: true, flow: true, kevtrend: true, cvetimeline: true, porttrend: true, news: true, cves: true },
+    layers: { ransomware: true, c2: true, attackers: true, compromised: true, phishing: true, tor: false, threatfox: true, urlhaus: true, outages: true, heat: false, cables: true, paths: true, trails: true, night: true },
+    pstate: {},
+    split1: true, split2: true, split3: true, split4: true, split5: true, split6: true,
+  };
+  // each preset keeps its own saved layout; the three screens keep the key they always had
+  LS_KEY = 'kestrel.settings.v2' + (V.panels ? '.' + view : '');
+}
+viewConfig(hashView());
 let S = loadSettings();
 function loadSettings() {
   try {
@@ -59,21 +107,101 @@ function loadSettings() {
     const m = Object.assign(structuredClone(DEFAULTS), raw);
     for (const k of ['hidden', 'collapsed', 'wide', 'layers', 'pstate']) m[k] = Object.assign({}, DEFAULTS[k], raw[k] || {});
     if (SCREEN === 'face' && !raw.split1) { for (const id of PANEL_IDS) if (!FACE_PANELS.includes(id)) m.hidden[id] = true; m.split1 = true; }
+    // 2026-11: the ATT&CK panels moved to their own MITRE screen; the new outage panel joins analytics
+    if (!raw.split2) { if (SCREEN !== 'mitre') for (const id of MITRE_PANELS) m.hidden[id] = true; if (SCREEN === 'analytics') { m.hidden.saas = false; m.wide.saas = true; } m.split2 = true; }
     // undo the brief dense-mode experiment: restore the layout saved before it
     if (raw.density === 'dense' && raw.comfyPrefs) { Object.assign(m, raw.comfyPrefs); delete m.density; delete m.densePrefs; delete m.comfyPrefs; }
     m.order = (raw.order || []).filter(id => PANEL_IDS.includes(id));
     PANEL_IDS.forEach((id, i) => { if (!m.order.includes(id)) m.order.splice(Math.min(i, m.order.length), 0, id); });
+    // 2026-11: analytics leads with the threat radar and the industry panels
+    // 2026-11-08: the Map screen keeps only Threat Pressure + Live Threat Feed (the feed fills the column)
+    if (SCREEN === 'face' && !raw.split4) { for (const id of PANEL_IDS) m.hidden[id] = !FACE_PANELS.includes(id); for (const id of FACE_PANELS) { m.collapsed[id] = false; m.wide[id] = false; } m.order = [...FACE_PANELS, ...m.order.filter(id => !FACE_PANELS.includes(id))]; m.split4 = true; }
+    // 2026-11-13: the simple outline map becomes the Map default (the Imagery button / O key switches back)
+    if (SCREEN === 'face' && !raw.split5) { if (raw.base !== 'outline') m.lastBase = raw.base || 'satellite'; m.base = 'outline'; m.split5 = true; }
+    // 2026-11-15: the distance radar is gone; the threat clock, ransomware flow and country race take the top row
+    if (VIEW === 'analytics' && !raw.split6) { const top = ANALYTICS_TOP.slice(0, 3); for (const id of top) m.hidden[id] = false; m.wide.flow = true; m.order = [...top, ...m.order.filter(id => !top.includes(id))]; m.split6 = true; }
+    if (VIEW === 'analytics' && !raw.split3) { for (const id of ANALYTICS_TOP) { m.hidden[id] = false; m.wide[id] = !['threatclock', 'barrace'].includes(id); } m.order = [...ANALYTICS_TOP, ...m.order.filter(id => !ANALYTICS_TOP.includes(id))]; m.split3 = true; }
     return m;
   } catch { return structuredClone(DEFAULTS); }
 }
 function save() { try { localStorage.setItem(LS_KEY, JSON.stringify(S)); } catch { /* private mode */ } }
 const ps = id => (S.pstate[id] = S.pstate[id] || {});
 
+/* ------------------------------------------------------------ page presets */
+// The top-bar buttons. Links to another screen keep that screen's own tab (two-monitor walls);
+// presets on this screen switch in place, without a reload.
+const SCREEN_BASE = {};
+for (const a of $$('#views a[data-to]')) SCREEN_BASE[a.dataset.to] = { href: a.getAttribute('href'), target: a.getAttribute('target') || '' };
+SCREEN_BASE[SCREEN] = { href: location.pathname + location.search, target: '' };
+const CYCLE_KEY = 'kestrel.cycle';
+const CYCLE_VIEWS = VIEWS.filter(v => v.screen === 'analytics').map(v => v.id);
+let CYC = { min: 0 }, cycleAt = Date.now(), lastInput = 0;
+try { CYC = Object.assign(CYC, JSON.parse(localStorage.getItem(CYCLE_KEY) || '{}')); } catch { /* private mode */ }
+const svgI = k => `<svg viewBox="0 0 24 24">${ICON[k]}</svg>`;
+function viewHref(v) { const b = SCREEN_BASE[v.screen]; return b ? b.href + (v.panels ? '#' + v.id : '') : null; }
+function renderViewNav() {
+  const nav = $('#views');
+  if (!nav) return;
+  nav.innerHTML = VIEWS.filter(v => SCREEN_BASE[v.screen]).map(v => {
+    const b = SCREEN_BASE[v.screen], here = v.screen === SCREEN;
+    return `<a class="vw ${v.id === VIEW ? 'on' : ''} ${v.panels ? 'pre' : ''}" data-view="${v.id}" href="${esc(viewHref(v))}" ${!here && b.target ? `target="${esc(b.target)}"` : ''} title="${esc(v.label + ' · ' + v.title)}">${svgI(v.id)}<span>${esc(v.label)}</span></a>`;
+  }).join('') + (SCREEN === 'analytics' ? `<button class="vw vw-cycle ${CYC.min ? 'on' : ''}" id="viewCycle" title="${CYC.min ? `Cycling the analytics presets every ${CYC.min} min (waits while you use the screen). Click to stop.` : 'Cycle through the analytics presets on this screen (interval under Customise)'}">${svgI('cycle')}<span>${CYC.min ? CYC.min + 'm' : 'Cycle'}</span><i></i></button>` : '');
+  // phones scroll the button row sideways: keep the current page's button in view
+  const on = $('.vw.on', nav);
+  if (on && nav.scrollWidth > nav.clientWidth) nav.scrollLeft = on.offsetLeft - nav.clientWidth / 2 + on.offsetWidth / 2;
+  const V = VIEW_BY[VIEW];
+  const sub = $('.brand .sub');
+  if (sub) sub.textContent = SCREEN === 'face' ? 'Threat Observatory' : SCREEN === 'mitre' ? 'MITRE ATT&CK' : V.label;
+  document.title = SCREEN === 'face' ? 'KESTREL · Cyber Threat Observatory' : `KESTREL · ${SCREEN === 'mitre' ? 'MITRE ATT&CK' : V.label}`;
+}
+function switchView(view) {
+  if (view === VIEW) return;
+  save();
+  viewConfig(view);
+  S = loadSettings();
+  document.body.dataset.view = VIEW;
+  applyLook(); buildDock(); buildDrawer(); renderViewNav();
+  $('#dock').scrollTop = 0;
+  window.scrollTo(0, 0);
+  cycleAt = Date.now();
+}
+function goView(id) {
+  const v = VIEW_BY[id];
+  if (!v || v.screen !== SCREEN) return false;
+  if (v.panels) { if (location.hash !== '#' + id) location.hash = id; else switchView(id); }
+  else { history.pushState(null, '', location.pathname + location.search); switchView(SCREEN); }
+  return true;
+}
+function setCycle(min) {
+  CYC.min = +min || 0;
+  if (CYC.min) CYC.last = CYC.min;
+  try { localStorage.setItem(CYCLE_KEY, JSON.stringify(CYC)); } catch { /* private mode */ }
+  cycleAt = Date.now();
+  renderViewNav();
+  const sel = $('#selCycle'); if (sel) sel.value = String(CYC.min);
+}
+addEventListener('hashchange', () => switchView(hashView()));
+addEventListener('popstate', () => switchView(hashView()));
+for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) addEventListener(ev, () => { lastInput = Date.now(); }, { passive: true });
+// a moving mouse also counts as someone at the screen (throttled; the story mode and preset cycling wait for it)
+let mmAt = 0;
+addEventListener('mousemove', () => { const n = Date.now(); if (n - mmAt > 1000) { mmAt = n; lastInput = n; } }, { passive: true });
+// Cycle: step to the next analytics preset; waits while someone is using the screen or the Customise drawer is open
+setInterval(() => {
+  const bar = $('#viewCycle i');
+  if (SCREEN !== 'analytics' || !CYC.min) { if (bar) bar.style.width = '0'; return; }
+  const per = CYC.min * 60000;
+  if (Date.now() - lastInput < 45000 || $('#drawer')?.classList.contains('open')) cycleAt = Math.max(cycleAt, Date.now() - per + 15000);
+  const f = Math.min(1, (Date.now() - cycleAt) / per);
+  if (bar) bar.style.width = (f * 100).toFixed(1) + '%';
+  if (f >= 1) { const i = CYCLE_VIEWS.indexOf(VIEW); goView(CYCLE_VIEWS[(i + 1) % CYCLE_VIEWS.length]); }
+}, 1000);
+
 /* ------------------------------------------------------------------- data */
-const FEEDS = ['kev', 'ransomware', 'attackers', 'c2', 'outages', 'news', 'cves', 'phishing', 'tor', 'threatfox', 'urlhaus', 'home', 'porthist'];
+const FEEDS = ['cloudstatus', 'kev', 'ransomware', 'attackers', 'c2', 'outages', 'news', 'cves', 'phishing', 'tor', 'threatfox', 'urlhaus', 'porthist', 'epss'];
 const GEO_FEEDS = ['c2', 'attackers', 'phishing', 'tor', 'threatfox', 'urlhaus'];
 const D = {}, META = {};
-let STATUS = null, INV = null;
+let STATUS = null;
 
 async function loadFeed(name, quiet) {
   try {
@@ -93,9 +221,13 @@ async function loadStatus() {
   const pend = STATUS?.geo?.pending || 0;
   const note = $('#geoNote');
   if (STATUS?.ports) {
-    const other = SCREEN === 'face' ? STATUS.ports.analytics : STATUS.ports.face;
-    const link = $('#screenLink');
-    if (link && other) link.href = `${location.protocol}//${location.hostname}:${other}/`;
+    let changed = false;
+    for (const [scr, port] of Object.entries(STATUS.ports)) {
+      if (!port || scr === SCREEN || !SCREEN_BASE[scr]) continue;
+      const href = `${location.protocol}//${location.hostname}:${port}/`;
+      if (SCREEN_BASE[scr].href !== href) { SCREEN_BASE[scr].href = href; changed = true; }
+    }
+    if (changed) renderViewNav();
   }
   if (pend > 0) { note.innerHTML = `Geolocating <b>${pend}</b> IPs via ip-api… map fills in as they resolve`; note.classList.remove('hidden'); }
   else note.classList.add('hidden');
@@ -110,7 +242,7 @@ async function refreshAll() {
 // While the background geolocator is working, re-pull IP feeds so markers appear progressively
 async function geoPoll() {
   const pend = await loadStatus();
-  if (pend > 0) { await Promise.all(GEO_FEEDS.filter(f => D[f] && !D[f].needsKey).map(f => loadFeed(f, true))); setTimeout(geoPoll, 15000); }
+  if (pend > 0) { await Promise.all(GEO_FEEDS.filter(f => D[f]).map(f => loadFeed(f, true))); setTimeout(geoPoll, 15000); }
   else if (geoPoll.wasPending) { await Promise.all(GEO_FEEDS.map(f => loadFeed(f, true))); }
   geoPoll.wasPending = pend > 0;
 }
@@ -118,11 +250,75 @@ async function geoPoll() {
 function onData(name, quiet) {
   for (const p of PANELS) if (p.deps.includes(name)) renderPanel(p.id);
   for (const L of LAYERS) if (L.feed === name || (L.id === 'heat' && GEO_FEEDS.includes(name))) updateLayer(L.id);
+  if (name === 'attackers' || name === 'outages' || name === 'ransomware') buildArcs();
   renderKPIs();
   lfIngest();
   if (name === 'news' || name === 'ransomware' || name === 'kev') renderTicker();
+  if (name === 'cloudstatus') renderOutageAlert();
+  chgSoon();
   if (!quiet) bootLog(`${name} ✓`);
 }
+
+/* ------------------------------------------------- cloud & SaaS outage alert */
+// A provider outage (from /api/cloudstatus) raises a steady red banner on every screen (no flashing).
+// The wall runs unattended, so each outage shows for OUTAGE_SHOW_MS after this screen first sees it and then
+// clears by itself (the Cloud & SaaS panel keeps listing it). Dismiss clears it early. A new outage shows again.
+const OUTAGE_SHOW_MS = 30 * 1000;
+const SEEN_KEY = 'kestrel.outage.seen', ACK_KEY = 'kestrel.outage.ack';
+let OUTAGE_TEST = null;
+const lsGet = k => { try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch { return {}; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
+const OUTAGE_SEEN = lsGet(SEEN_KEY);
+function outageAlerts() {
+  const live = (D.cloudstatus?.alerts || []).slice();
+  if (OUTAGE_TEST && Date.now() < OUTAGE_TEST.until) live.unshift(OUTAGE_TEST.alert);
+  return live;
+}
+// alerts still inside their 30-second window and not dismissed
+function activeOutages() {
+  const now = Date.now(), acks = lsGet(ACK_KEY);
+  let dirty = false;
+  for (const a of outageAlerts()) if (!OUTAGE_SEEN[a.key]) { OUTAGE_SEEN[a.key] = now; dirty = true; }
+  for (const [k, v] of Object.entries(OUTAGE_SEEN)) if (now - v > 14 * 864e5) { delete OUTAGE_SEEN[k]; dirty = true; }
+  if (dirty) lsSet(SEEN_KEY, OUTAGE_SEEN);
+  return outageAlerts().filter(a => !acks[a.key] && now - OUTAGE_SEEN[a.key] < OUTAGE_SHOW_MS);
+}
+function renderOutageAlert() {
+  let el = $('#outageAlert');
+  if (!el) {
+    el = document.createElement('div'); el.id = 'outageAlert'; el.setAttribute('role', 'alert');
+    document.body.prepend(el);
+    el.addEventListener('click', e => {
+      if (e.target.closest('[data-ack]')) {
+        const acks = lsGet(ACK_KEY), now = Date.now();
+        for (const a of outageAlerts()) acks[a.key] = now;
+        for (const [k, v] of Object.entries(acks)) if (now - v > 14 * 864e5) delete acks[k];
+        lsSet(ACK_KEY, acks);
+        renderOutageAlert();
+      } else if (e.target.closest('[data-goto-saas]')) gotoPanel('saas');
+    });
+  }
+  const alerts = activeOutages();
+  const wasOn = document.body.classList.contains('outage-on');
+  document.body.classList.toggle('outage-on', alerts.length > 0);
+  if (wasOn !== alerts.length > 0) setTimeout(() => map?.resize(), 50);
+  if (!alerts.length) { el.innerHTML = ''; return; }
+  const left = Math.max(0, Math.ceil(Math.max(...alerts.map(a => OUTAGE_SEEN[a.key] + OUTAGE_SHOW_MS - Date.now())) / 1000));
+  const svcs = [...new Set(alerts.map(a => a.service))];
+  const line = a => `<span class="oa-item"><b>${esc(a.service)}</b> ${esc(a.title)}${a.started ? ` <i>· started ${ago(a.started)} ago</i>` : ''}</span>`;
+  el.innerHTML = `<div class="oa-icon">!</div>
+    <div class="oa-main"><div class="oa-head">Outage <span>${esc(svcs.join(' · '))}</span></div>
+    <div class="oa-list">${alerts.slice(0, 3).map(line).join('')}${alerts.length > 3 ? `<span class="oa-item">+${alerts.length - 3} more</span>` : ''}</div></div>
+    <div class="oa-act"><span class="oa-left" title="The banner clears itself; the Cloud &amp; SaaS panel keeps the details">clears in ${left}s</span><button data-ack title="Clear the banner now on this screen">Dismiss</button><button data-goto-saas>Details</button></div>`;
+}
+setInterval(() => { if (document.body.classList.contains('outage-on')) renderOutageAlert(); }, 1000);
+function testOutageAlert() {
+  OUTAGE_TEST = { until: Date.now() + 30000, alert: { key: 'test|' + Date.now(), service: 'TEST', title: 'This is a test of the outage alert. It clears itself in 30 seconds.', started: new Date().toISOString(), level: 'major' } };
+  renderOutageAlert();
+  setTimeout(renderOutageAlert, 30500);
+}
+document.addEventListener('click', e => { if (e.target.closest('[data-outage-test]')) testOutageAlert(); });
+if (new URLSearchParams(location.search).has('outage-test')) setTimeout(testOutageAlert, 1500);
 
 /* ------------------------------------------------------- threat pressure */
 const INFOCON_LVL = { green: 0, yellow: 1, orange: 2, red: 3 };
@@ -138,15 +334,57 @@ function pressure() {
   let sc = 0, wt = 0;
   for (const c of comps) { if (c.v == null) continue; c.f = Math.min(c.v / c.max, 1); sc += c.f * c.w; wt += c.w; }
   const score = wt ? Math.round(sc / wt * 100) : null;
-  const lvl = score == null ? ['—', '#4d6378'] : score < 20 ? ['LOW', '#5ee08a'] : score < 40 ? ['GUARDED', '#39b8ff'] : score < 60 ? ['ELEVATED', '#ffd166'] : score < 80 ? ['HIGH', '#ff8a3d'] : ['SEVERE', '#ff2d55'];
-  return { score, lvl, comps };
+  const lvl = score == null ? ['—', '#5f5f67'] : score < 20 ? ['LOW', '#6cc28a'] : score < 40 ? ['GUARDED', '#5b9bd5'] : score < 60 ? ['ELEVATED', '#e9c46a'] : score < 80 ? ['HIGH', '#f08a3c'] : ['SEVERE', '#e5484d'];
+  // DEFCON-style level: 5 = calm ... 1 = severe
+  const n = score == null ? null : score < 20 ? 5 : score < 40 ? 4 : score < 60 ? 3 : score < 80 ? 2 : 1;
+  return { score, lvl, comps, n };
+}
+
+/* ------------------------------------------- threat level history (header trend) */
+// The pressure score is sampled every 5 minutes into this browser's storage (26 hours kept), so the header
+// can say which way the level has moved over the last hour and "what changed" can report it.
+const PH_KEY = 'kestrel.pressure.hist';
+let PHIST = (() => { try { const a = JSON.parse(localStorage.getItem(PH_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } })();
+function recordPressure(score) {
+  if (score == null) return;
+  const now = Date.now(), last = PHIST[PHIST.length - 1];
+  if (last && now - last[0] < 5 * 60e3) { if (now - last[0] < 60e3) return; last[1] = score; }
+  else PHIST.push([now, score]);
+  PHIST = PHIST.filter(x => now - x[0] < 26 * 3600e3);
+  try { localStorage.setItem(PH_KEY, JSON.stringify(PHIST)); } catch { /* private mode */ }
+}
+// the score about an hour ago (null until there is an hour of history)
+function pressureHourAgo() {
+  const cut = Date.now() - 55 * 60e3;
+  let best = null;
+  for (const x of PHIST) if (x[0] <= cut) best = x;
+  return best && Date.now() - best[0] < 3 * 3600e3 ? best[1] : null;
+}
+let lastLevelN = null;
+
+/* ----------------------------------------------------- header threat level */
+function renderLevel(p) {
+  const pill = $('#levelPill');
+  if (!pill) return;
+  recordPressure(p.score);
+  if (!pill.querySelector('.lv-pips')) pill.innerHTML = `<span class="lv-k">Threat<br>level</span><span class="lv-n"></span><span class="lv-body"><span class="lv-pips">${[5, 4, 3, 2, 1].map(i => `<i data-l="${i}"></i>`).join('')}</span><span class="lv-txt"></span></span><span class="lv-num"></span>`;
+  pill.style.setProperty('--lv', p.lvl[1]);
+  pill.dataset.level = p.n ?? '';
+  pill.querySelector('.lv-n').textContent = p.n ?? '–';
+  pill.querySelector('.lv-txt').textContent = p.lvl[0];
+  $$('.lv-pips i', pill).forEach(i => i.classList.toggle('on', p.n != null && +i.dataset.l >= p.n));
+  const prev = pressureHourAgo(), d = prev == null || p.score == null ? null : p.score - prev;
+  pill.querySelector('.lv-num').innerHTML = p.score == null ? '' : `${p.score}<small>/100</small>${d == null ? '' : `<em class="${d > 2 ? 'up' : d < -2 ? 'dn' : ''}">${d > 2 ? '▲' : d < -2 ? '▼' : '■'} ${d > 0 ? '+' : ''}${d} 1h</em>`}`;
+  pill.title = `Threat level ${p.n ?? '–'} of 5 (${p.lvl[0]}): Threat Pressure Index ${p.score ?? '–'}/100${d == null ? '' : `, ${d >= 0 ? 'up' : 'down'} ${Math.abs(d)} in the last hour`}. 5 is calm, 1 is severe. Click for the breakdown.`;
+  if (lastLevelN != null && p.n != null && p.n !== lastLevelN) { pill.classList.remove('lv-flash'); void pill.offsetWidth; pill.classList.add('lv-flash'); }
+  if (p.n != null) lastLevelN = p.n;
 }
 
 /* ------------------------------------------------------------------- KPIs */
 function renderKPIs() {
   const p = pressure();
   const k = [
-    ['Pressure', p.score ?? '—', p.lvl[0], 'pressure', p.score >= 60 ? 'alert' : p.score >= 40 ? 'warn' : ''],
+    ['Threat level', p.n ?? '—', `${p.lvl[0]} · ${p.score ?? '–'}`, 'pressure', p.score >= 60 ? 'alert' : p.score >= 40 ? 'warn' : ''],
     ['INFOCON', (D.attackers?.infocon || '—').toUpperCase(), '', 'attackers', D.attackers?.infocon && D.attackers.infocon !== 'green' ? 'warn' : ''],
     ['Ransom 24h', D.ransomware?.last24h, 'victims', 'ransomware', D.ransomware?.last24h > 20 ? 'alert' : ''],
     ['KEV 7d', D.kev?.added7 != null ? '+' + D.kev.added7 : null, 'exploited', 'kev', D.kev?.added7 > 8 ? 'warn' : ''],
@@ -155,10 +393,7 @@ function renderKPIs() {
     ['Outages', D.outages?.ongoing, 'live', 'outages', D.outages?.ongoing > 5 ? 'warn' : ''],
     ['Phish', D.phishing?.total, 'urls', 'phishing', ''],
   ];
-  const pill = $('#levelPill');
-  pill.querySelector('.lv-dot').style.background = p.lvl[1];
-  pill.querySelector('.lv-txt').textContent = p.score == null ? 'Threat level —' : `Threat level · ${p.lvl[0]}`;
-  pill.querySelector('.lv-num').textContent = p.score == null ? '' : p.score + '/100';
+  renderLevel(p);
   $('#kpis').innerHTML = k.map(([lbl, v, sub, pid, cls]) =>
     `<div class="kpi ${cls}" data-goto="${pid}" title="Show ${esc(pid)} panel"><div class="k">${esc(lbl)}</div><div class="v">${esc(v ?? '—')}<small>${esc(sub)}</small></div></div>`).join('');
 }
@@ -187,7 +422,6 @@ function chips(pid, key, opts, cur) {
 }
 const sevOf = s => s == null ? 'UNSCORED' : s >= 9 ? 'CRITICAL' : s >= 7 ? 'HIGH' : s >= 4 ? 'MEDIUM' : s > 0 ? 'LOW' : 'NONE';
 const nvd = id => `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`;
-const needsKey = (feed) => `<div class="keynote">This feed needs a free API key.<br>Add <code>${esc(D[feed]?.needsKey)}</code> to <code>config.json</code> (or set it as an environment variable) and restart KESTREL. See the README for where to get one.</div>`;
 const COUNTRY_CENTER = {};
 
 /* ----------------------------------------------------------------- panels */
@@ -289,7 +523,7 @@ const PANELS = [
         const pts = tr.map((t, i) => `${(i / (tr.length - 1) * w).toFixed(1)},${(h - 4 - t.count / m * (h - 8)).toFixed(1)}`).join(' ');
         spark = `<div class="sub-h">ISC threat-feed volume · 30d</div><svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none"><polygon points="0,${h} ${pts} ${w},${h}" fill="rgba(var(--acc-rgb),.12)"/><polyline points="${pts}" fill="none" stroke="var(--acc)" stroke-width="1.5" vector-effect="non-scaling-stroke"/></svg>`;
       }
-      return spark + `<div class="sub-h">Most-reported sources</div><div class="rows">${d.items.slice(0, 40).map(a => `<div class="r click" ${a.geo ? flyAttr(a.geo) : ''} data-inv="${esc(a.ip)}"><span class="m" style="text-align:left;min-width:20px">#${a.rank}</span><div><div class="t">${esc(a.ip)} ${cc(a.geo?.cc)}</div><div class="s">${esc(a.geo?.isp || 'locating…')}</div><div class="trk" style="height:3px;background:rgba(255,255,255,.05);margin-top:3px"><div style="height:3px;width:${(a.reports / max * 100).toFixed(1)}%;background:var(--attk)"></div></div></div><span class="m">${fmtN(a.reports)}<br>reports</span></div>`).join('')}</div>`;
+      return spark + `<div class="sub-h">Most-reported sources</div><div class="rows">${d.items.slice(0, 40).map(a => `<div class="r click" ${a.geo ? flyAttr(a.geo) : ''}><span class="m" style="text-align:left;min-width:20px">#${a.rank}</span><div><div class="t">${esc(a.ip)} ${cc(a.geo?.cc)}</div><div class="s">${esc(a.geo?.isp || 'locating…')}</div><div class="trk" style="height:3px;background:rgba(255,255,255,.05);margin-top:3px"><div style="height:3px;width:${(a.reports / max * 100).toFixed(1)}%;background:var(--attk)"></div></div></div><span class="m">${fmtN(a.reports)}<br>reports</span></div>`).join('')}</div>`;
     },
   },
   {
@@ -320,7 +554,7 @@ const PANELS = [
     badge: () => D.c2 ? `${D.c2.online} online` : '',
     render() {
       const d = D.c2;
-      return `<div class="chips">${d.families.map(([f, n]) => `<span class="tag pur">${esc(f)} ${n}</span>`).join('')}</div><div class="rows">${d.items.map(c => `<div class="r click" ${flyAttr(c.geo)} data-inv="${esc(c.ip)}"><span class="dotS" style="background:${c.status === 'online' ? 'var(--crit)' : 'var(--mute)'};${c.status === 'online' ? 'box-shadow:0 0 6px var(--crit)' : ''}"></span><div><div class="t">${esc(c.ip)}:${esc(c.port)} ${cc(c.cc)}</div><div class="s"><span class="tag pur">${esc(c.malware)}</span>${esc(c.asName || '')}</div></div><span class="m">${esc(c.status)}<br>${esc(c.lastOnline || '')}</span></div>`).join('') || '<div class="loading">Feodo tracker currently lists no C2s</div>'}</div>
+      return `<div class="chips">${d.families.map(([f, n]) => `<span class="tag pur">${esc(f)} ${n}</span>`).join('')}</div><div class="rows">${d.items.map(c => `<div class="r click" ${flyAttr(c.geo)}><span class="dotS" style="background:${c.status === 'online' ? 'var(--crit)' : 'var(--mute)'};${c.status === 'online' ? 'box-shadow:0 0 6px var(--crit)' : ''}"></span><div><div class="t">${esc(c.ip)}:${esc(c.port)} ${cc(c.cc)}</div><div class="s"><span class="tag pur">${esc(c.malware)}</span>${esc(c.asName || '')}</div></div><span class="m">${esc(c.status)}<br>${esc(c.lastOnline || '')}</span></div>`).join('') || '<div class="loading">Feodo tracker currently lists no C2s</div>'}</div>
       <div class="disclaim">Feodo Tracker covers banking-trojan/loader botnets (Emotet, QakBot, Dridex…). Small numbers here usually mean takedowns worked.</div>`;
     },
   },
@@ -353,39 +587,19 @@ const PANELS = [
     },
   },
   {
-    id: 'investigate', title: 'IP Investigation', deps: [],
-    src: () => 'GreyNoise community · feeds · CINS · Spamhaus DROP',
-    render() {
-      const st = ps('investigate');
-      let out = `<form class="inv-form" data-invform><input name="ip" placeholder="e.g. 45.83.66.22" value="${esc(st.q || '')}" spellcheck="false"><button class="btn">Scan</button></form>`;
-      if (INV === 'loading') return out + '<div class="loading">querying sources</div>';
-      if (!INV) return out + '<div class="keynote">Enter an IP, or click <b>Investigate</b> on any map marker or IP row. KESTREL checks it against every loaded feed, the CINS Army list, Spamhaus DROP and GreyNoise.</div>';
-      if (INV.error) return out + `<div class="err">${esc(INV.error)}</div>`;
-      const gn = INV.greynoise || {};
-      const label = { listed: 'LISTED · HOSTILE', noise: 'INTERNET SCANNER', clean: 'NO HITS' }[INV.verdict];
-      out += `<div class="verdict ${INV.verdict}"><span>${esc(INV.ip)}</span><span>${label}</span></div>`;
-      out += `<table class="kv"><tr><td>Location</td><td>${esc(loc(INV.geo))}</td></tr><tr><td>Network</td><td>${esc(INV.geo?.as || '—')}</td></tr><tr><td>ISP</td><td>${esc(INV.geo?.isp || '—')}</td></tr><tr><td>rDNS</td><td>${esc(INV.rdns || '—')}</td></tr>
-        <tr><td>GreyNoise</td><td>${gn.error ? esc(gn.error) : `${gn.noise ? '<span class="tag org">noise</span>' : ''}${gn.riot ? '<span class="tag grn">benign service</span>' : ''}${gn.classification ? `<span class="tag ${gn.classification === 'malicious' ? 'red' : ''}">${esc(gn.classification)}</span>` : ''} ${esc(gn.name && gn.name !== 'unknown' ? gn.name : '')} <span class="s">${esc(gn.message || '')}</span>`}</td></tr></table>`;
-      out += `<div class="sub-h">Feed matches (${INV.hits.length})</div>` + (INV.hits.length ? `<div class="rows">${INV.hits.map(h => `<div class="r"><span class="dotS" style="background:var(--crit)"></span><div><div class="t">${esc(h.feed)}</div><div class="s">${esc(Object.entries(h.detail).filter(([, v]) => v != null && v !== '' && typeof v !== 'object').slice(0, 5).map(([k, v]) => `${k}: ${v}`).join(' · '))}</div></div><span></span></div>`).join('')}</div>` : '<div class="s" style="color:var(--dim)">Not present in any loaded feed or blocklist.</div>');
-      return out;
-    },
-  },
-  {
-    id: 'threatfox', title: 'ThreatFox IOCs · 24h', deps: ['threatfox'], feed: 'threatfox', keyed: true,
+    id: 'threatfox', title: 'C2 Servers · IOCs', deps: ['threatfox'], feed: 'threatfox',
     badge: () => D.threatfox?.items?.length ? `${D.threatfox.items.length} iocs` : '',
     render() {
       const d = D.threatfox;
-      if (d.needsKey) return needsKey('threatfox');
-      return `<div class="chips">${d.families.map(([f, n]) => `<span class="tag pur">${esc(f)} ${n}</span>`).join('')}</div><div class="rows">${d.items.slice(0, 100).map(x => `<div class="r ${x.geo ? 'click' : ''}" ${flyAttr(x.geo)}><span class="dotS" style="background:var(--tfox)"></span><div><div class="t" style="font-size:10.5px">${esc(x.ioc)}</div><div class="s"><span class="tag">${esc(x.type)}</span><span class="tag pur">${esc(x.malware)}</span>${esc(x.threat)} · conf ${esc(x.confidence)}%</div></div><span class="m">${ago(x.firstSeen)}</span></div>`).join('')}</div>`;
+      return `<div class="chips">${d.families.map(([f, n]) => `<span class="tag pur">${esc(f)} ${n}</span>`).join('')}</div><div class="rows">${d.items.slice(0, 100).map(x => `<div class="r ${x.geo ? 'click' : ''}" ${flyAttr(x.geo)}><span class="dotS" style="background:var(--tfox)"></span><div><div class="t" style="font-size:10.5px">${esc(x.ioc)}</div><div class="s"><span class="tag">${esc(x.type)}</span><span class="tag pur">${esc(x.malware)}</span>${esc(x.threat)} · conf ${esc(x.confidence)}%</div></div><span class="m">${x.firstSeen ? ago(x.firstSeen) : (x.tags || []).includes('verified') ? 'verified' : 'scan hit'}</span></div>`).join('')}</div>`;
     },
   },
   {
-    id: 'urlhaus', title: 'URLhaus Malware URLs', deps: ['urlhaus'], feed: 'urlhaus', keyed: true,
-    badge: () => D.urlhaus?.items?.length ? `${D.urlhaus.online} online` : '',
+    id: 'urlhaus', title: 'URLhaus Malware URLs', deps: ['urlhaus'], feed: 'urlhaus',
+    badge: () => D.urlhaus?.items?.length ? (D.urlhaus.list === 'recent' ? `${D.urlhaus.items.length} listed · 30d` : `${D.urlhaus.online} online`) : '',
     render() {
       const d = D.urlhaus;
-      if (d.needsKey) return needsKey('urlhaus');
-      return `<div class="rows">${d.items.slice(0, 100).map(x => `<div class="r ${x.geo ? 'click' : ''}" ${flyAttr(x.geo)}><span class="dotS" style="background:${x.status === 'online' ? 'var(--uh)' : 'var(--mute)'}"></span><div><div class="t" style="font-size:10.5px">${esc(x.url)}</div><div class="s">${cc(x.geo?.cc)}${esc(x.threat || '')} ${(x.tags || []).slice(0, 4).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div></div><span class="m">${ago(x.added)}</span></div>`).join('')}</div>`;
+      return `<div class="rows">${d.items.slice(0, 100).map(x => `<div class="r ${x.geo ? 'click' : ''}" ${flyAttr(x.geo)}><span class="dotS" style="background:${x.status === 'online' ? 'var(--uh)' : 'var(--mute)'}"></span><div><div class="t" style="font-size:10.5px">${esc(x.url)}</div><div class="s">${cc(x.geo?.cc)}${esc(x.threat || '')} ${(x.tags || []).slice(0, 4).map(t => `<span class="tag">${esc(t)}</span>`).join('')}</div></div><span class="m">${x.added ? ago(x.added) : esc(x.status || '')}</span></div>`).join('')}</div>`;
     },
   },
 ];
@@ -462,16 +676,18 @@ function lfHarvest() {
   const ev = [];
   const isp = g => g?.isp ? ' · ' + g.isp : '';
   const add = (id, kind, title, sub, geo, t, extra) => ev.push(Object.assign({ id, kind, title, sub, geo, t }, extra));
-  for (const r of D.ransomware?.items || []) add('r:' + r.group + '|' + r.victim, 'ransom', `${r.group} claims ${r.victim}`, [r.sector, COUNTRY_NAME[r.cc] || r.cc].filter(Boolean).join(' · '), r.geo, r.discovered);
-  for (const c of D.c2?.items || []) add('c:' + c.ip, 'c2', `${c.malware} C2 ${c.status === 'online' ? 'online' : 'listed'} · ${c.ip}:${c.port}`, loc(c.geo) + (c.asName ? ' · ' + c.asName : ''), c.geo, null, { ip: c.ip });
-  for (const a of D.attackers?.items || []) add('a:' + a.ip, 'attack', `Scanning source ${a.ip} · ${fmtN(a.reports)} reports`, loc(a.geo) + isp(a.geo), a.geo, null, { ip: a.ip });
-  for (const x of D.attackers?.compromised || []) add('e:' + x.ip, 'comp', `Compromised host ${x.ip}`, loc(x.geo) + isp(x.geo), x.geo, null, { ip: x.ip });
-  for (const p of D.phishing?.items || []) add('p:' + p.url, 'phish', `Phishing site on ${p.host}`, loc(p.geo) + isp(p.geo), p.geo, null, { ip: p.ip });
-  for (const o of (D.outages?.items || []).filter(o => o.ongoing)) add('o:' + o.cc + o.start, 'outage', `Internet disruption · ${o.name}`, o.sources.join(', '), o.geo, o.startIso);
-  for (const k of (D.kev?.items || []).slice(0, 30)) add('k:' + k.cve, 'vuln', `${k.cve} added to CISA KEV`, `${k.vendor} ${k.product} · ${k.name}`, null, k.added + 'T12:00:00Z', { url: nvd(k.cve) });
-  for (const c of (D.cves?.items || []).filter(c => c.score >= 9).slice(0, 40)) add('v:' + c.id, 'vuln', `${c.id} · CVSS ${c.score}`, c.desc.slice(0, 110), null, c.published, { url: nvd(c.id) });
-  if (!D.threatfox?.needsKey) for (const x of (D.threatfox?.items || []).slice(0, 150)) add('t:' + x.ioc, 'ioc', `${x.malware} IOC · ${x.type}`, x.ioc, x.geo, x.firstSeen, { ip: x.ip });
-  if (!D.urlhaus?.needsKey) for (const x of (D.urlhaus?.items || []).slice(0, 150)) add('u:' + x.url, 'ioc', `Malware URL${x.threat ? ' · ' + x.threat : ''}`, x.url, x.geo, x.added, { ip: x.ip });
+  // sev drives the size of the map pulse: crit > high > med > low
+  const fresh = (t, h) => Date.now() - (Date.parse(t || '') || 0) < h * 3600e3;
+  for (const r of D.ransomware?.items || []) add('r:' + r.group + '|' + r.victim, 'ransom', `${r.group} claims ${r.victim}`, [r.sector, COUNTRY_NAME[r.cc] || r.cc].filter(Boolean).join(' · '), r.geo, r.discovered, { sev: fresh(r.discovered, 6) ? 'crit' : 'high' });
+  for (const c of D.c2?.items || []) add('c:' + c.ip, 'c2', `${c.malware} C2 ${c.status === 'online' ? 'online' : 'listed'} · ${c.ip}:${c.port}`, loc(c.geo) + (c.asName ? ' · ' + c.asName : ''), c.geo, null, { ip: c.ip, sev: c.status === 'online' ? 'high' : 'low' });
+  for (const a of D.attackers?.items || []) add('a:' + a.ip, 'attack', `Scanning source ${a.ip} · ${fmtN(a.reports)} reports`, loc(a.geo) + isp(a.geo), a.geo, null, { ip: a.ip, sev: a.rank <= 10 ? 'high' : a.rank <= 40 ? 'med' : 'low' });
+  for (const x of D.attackers?.compromised || []) add('e:' + x.ip, 'comp', `Compromised host ${x.ip}`, loc(x.geo) + isp(x.geo), x.geo, null, { ip: x.ip, sev: 'low' });
+  for (const p of D.phishing?.items || []) add('p:' + p.url, 'phish', `Phishing site on ${p.host}`, loc(p.geo) + isp(p.geo), p.geo, null, { ip: p.ip, sev: 'med' });
+  for (const o of (D.outages?.items || []).filter(o => o.ongoing)) add('o:' + o.cc + o.start, 'outage', `Internet disruption · ${o.name}`, o.sources.join(', '), o.geo, o.startIso, { sev: fresh(o.startIso, 3) ? 'crit' : 'high' });
+  for (const k of (D.kev?.items || []).slice(0, 30)) add('k:' + k.cve, 'vuln', `${k.cve} added to CISA KEV`, `${k.vendor} ${k.product} · ${k.name}`, null, k.added + 'T12:00:00Z', { url: nvd(k.cve), sev: 'crit' });
+  for (const c of (D.cves?.items || []).filter(c => c.score >= 9).slice(0, 40)) add('v:' + c.id, 'vuln', `${c.id} · CVSS ${c.score}`, c.desc.slice(0, 110), null, c.published, { url: nvd(c.id), sev: 'crit' });
+  for (const x of (D.threatfox?.items || []).slice(0, 150)) add('t:' + x.ioc, 'ioc', `${x.malware} C2 server${(x.tags || []).includes('unverified') ? ' (unverified)' : ''}`, x.ioc, x.geo, x.firstSeen, { ip: x.ip, sev: 'med' });
+  for (const x of (D.urlhaus?.items || []).slice(0, 150)) add('u:' + x.url, 'ioc', `Malware URL${x.threat ? ' · ' + x.threat : ''}`, x.url, x.geo, x.added, { ip: x.ip, sev: 'med' });
   return ev;
 }
 function lfIngest() {
@@ -491,7 +707,7 @@ function lfIngest() {
 function lfRow(e) {
   const K = LF_KINDS[e.kind];
   const a = e.geo ? flyAttr(e.geo) : e.url && safeUrl(e.url) ? `data-open="${esc(e.url)}"` : '';
-  return `<div class="r lf-row ${a ? 'click' : ''} ${e.isNew ? 'is-new' : ''}" ${a}><span class="typebar" style="background:${K.color}"></span><div><div class="t"><span class="tag ${K.tag}">${K.label}</span>${e.isNew ? '<span class="tag red">NEW</span>' : ''}${esc(e.title)}</div><div class="s">${esc(e.sub || '')}</div></div><span class="m">${new Date(e.at).toISOString().slice(11, 19)}<br>${e.t ? ago(e.t) + ' ago' : 'in feed'}</span></div>`;
+  return `<div class="r lf-row ${a ? 'click' : ''} ${e.isNew ? 'is-new' : ''} sev-${e.sev || 'low'}" ${a}><span class="typebar" style="background:${K.color}"></span><div><div class="t"><span class="tag ${K.tag}">${K.label}</span>${e.isNew ? '<span class="tag red">NEW</span>' : ''}${esc(e.title)}</div><div class="s">${esc(e.sub || '')}</div></div><span class="m">${new Date(e.at).toISOString().slice(11, 19)}<br>${e.t ? ago(e.t) + ' ago' : 'in feed'}</span></div>`;
 }
 function lfTick() {
   if (LF.paused || document.hidden || (!LF.pool.length && !LF.fresh.length)) return;
@@ -512,7 +728,7 @@ function lfTick() {
   }
   const badge = $('.panel[data-id="livefeed"] .badge');
   if (badge) { badge.textContent = `${LF.rate} / min`; badge.style.display = ''; }
-  if (e.geo && S.pings) ping(e);
+  if (e.geo && S.pings) { ping(e); arcShot(e); shock(e); }
 }
 let lfTimer;
 function lfSchedule() {
@@ -533,35 +749,314 @@ function ping(e) {
   setTimeout(() => { m.remove(); pingCount--; }, 3400);
 }
 
+/* ------------------------------------------------------ severity pulses (map) */
+// Critical and high events send a shockwave across the map where they land: red for critical (a ransomware claim
+// in the last 6 hours, a fresh internet outage), orange for high (an online C2, a top-10 scanner, older claims),
+// amber for anything flagged NEW since KESTREL opened. Low-severity events keep the small ping only.
+const SEV = { crit: { c: 'var(--crit)', r: 'Critical' }, high: { c: 'var(--high)', r: 'High' }, med: { c: 'var(--med)', r: 'Elevated' } };
+let shockCount = 0;
+function shock(e, force) {
+  if (!mapReady || REDUCED_MOTION || shockCount > 3) return;
+  const sev = force || (e.sev === 'crit' || e.sev === 'high' ? e.sev : e.isNew ? 'med' : null);
+  if (!sev || !e.geo) return;
+  const el = document.createElement('div');
+  el.className = 'shock sv-' + sev;
+  el.style.setProperty('--sc', SEV[sev].c);
+  el.innerHTML = '<i></i><i></i><i></i><b></b>';
+  const m = new maplibregl.Marker({ element: el, anchor: 'center' }).setLngLat([e.geo.lon, e.geo.lat]).addTo(map);
+  shockCount++;
+  setTimeout(() => { m.remove(); shockCount--; }, 3600);
+}
+
+/* ---------------------------------------------------- what changed · last hour */
+// The bottom-left strip of the ticker. Everything comes from the loaded feeds: items with a timestamp in the
+// last 60 minutes, plus items this browser saw for the first time in the last hour (KEV additions, C2 servers
+// coming online, outages), plus the threat level's own move. First-seen times are kept for 3 days in this
+// browser's storage; on the very first visit everything already in the feeds counts as old, so nothing is
+// reported as new until it really is.
+const FS_KEY = 'kestrel.firstseen.v1';
+const FS = (() => { try { return JSON.parse(localStorage.getItem(FS_KEY) || '{}') || {}; } catch { return {}; } })();
+function firstSeen(keys) {
+  const now = Date.now(), base = !FS.__init;
+  let dirty = false;
+  for (const k of keys) if (!(k in FS)) { FS[k] = base ? 0 : now; dirty = true; }
+  if (base && keys.length) { FS.__init = now; dirty = true; }
+  if (dirty) {
+    for (const [k, v] of Object.entries(FS)) if (k !== '__init' && v && now - v > 3 * 864e5) delete FS[k];
+    try { localStorage.setItem(FS_KEY, JSON.stringify(FS)); } catch { /* private mode */ }
+  }
+}
+const SEV_RANK = { crit: 0, high: 1, med: 2, info: 3, ok: 4 };
+function changesModel() {
+  const now = Date.now(), H = 3600e3, inHour = t => { const v = Date.parse(t || ''); return v && now - v < H && v <= now + 6e5; };
+  const newHere = k => FS[k] && now - FS[k] < H;
+  const out = [], add = (sev, html, t, act) => out.push({ sev, html, t: t ? Date.parse(t) || t : now, act });
+  // KEV, C2 and outage tracking
+  if (D.kev) firstSeen(D.kev.items.map(k => 'kev:' + k.cve));
+  if (D.c2) firstSeen(D.c2.items.filter(c => c.status === 'online').map(c => 'c2:' + c.ip));
+  if (D.outages) firstSeen(D.outages.items.filter(o => o.ongoing).map(o => 'out:' + o.cc));
+  // ransomware
+  const rv = (D.ransomware?.items || []).filter(v => inHour(v.discovered));
+  for (const v of rv.slice(0, 4)) add('high', `<b class="c-r">${esc(v.group)}</b> claims <b>${esc(v.victim)}</b>${v.cc ? ` · ${esc(COUNTRY_NAME[v.cc] || v.cc)}` : ''}${v.sector ? ` · ${esc(v.sector)}` : ''}`, v.discovered, v.geo ? { fly: v.geo } : { goto: 'ransomware' });
+  if (rv.length > 4) add('high', `<b>${rv.length}</b> ransomware claims posted in the last hour`, rv[0].discovered, { goto: 'ransomware' });
+  const items = D.ransomware?.items || [];
+  if (items.length) {
+    const by = {};
+    for (const v of items) { const a = now - (Date.parse(v.discovered) || 0); if (a < 96 * H) { const g = by[v.group] = by[v.group] || { all: 0, h6: 0, last: v.discovered }; g.all++; if (a < 6 * H) g.h6++; } }
+    for (const [g, x] of Object.entries(by)) { const avg = x.all / 16; if (x.h6 >= 3 && x.h6 >= 2.5 * avg) add('high', `<b class="c-r">${esc(g)}</b> is surging: <b>${x.h6}</b> claims in 6h (usually about ${avg.toFixed(1)})`, x.last, { goto: 'ransomware' }); }
+  }
+  // KEV
+  const kevNew = (D.kev?.items || []).filter(k => newHere('kev:' + k.cve));
+  for (const k of kevNew.slice(0, 3)) add('crit', `CISA KEV adds <b>${esc(k.cve)}</b> · ${esc(k.vendor)} ${esc(k.product)}${k.ransomware ? ' · <b class="c-r">ransomware use</b>' : ''}`, FS['kev:' + k.cve], { open: nvd(k.cve) });
+  // CVEs
+  const cv = (D.cves?.items || []).filter(c => inHour(c.published));
+  const crit = cv.filter(c => c.score >= 9), high = cv.filter(c => c.score >= 7 && c.score < 9);
+  if (crit.length) add('crit', `<b>${crit.length}</b> critical CVE${crit.length > 1 ? 's' : ''} published: ${crit.slice(0, 3).map(c => `<b>${esc(c.id)}</b> (${c.score})`).join(', ')}`, crit[0].published, { goto: 'cves' });
+  if (high.length) add('med', `<b>${high.length}</b> high-severity CVE${high.length > 1 ? 's' : ''} published`, high[0].published, { goto: 'cves' });
+  // outages
+  for (const o of (D.outages?.items || []).filter(o => o.ongoing && (inHour(o.startIso) || newHere('out:' + o.cc))).slice(0, 3))
+    add('high', `Internet disruption began in <b>${esc(o.name)}</b> · ${esc(o.sources.join(', '))}`, o.startIso, o.geo ? { fly: o.geo } : { goto: 'outages' });
+  for (const sv of D.cloudstatus?.services || []) for (const i of sv.incidents.filter(i => i.level !== 'info' && inHour(i.started)).slice(0, 2))
+    add(i.level === 'major' ? 'crit' : 'med', `<b>${esc(sv.name)}</b> ${i.level === 'major' ? 'outage' : 'degraded'}: ${esc(i.title)}`, i.started, { goto: 'saas' });
+  // C2
+  const c2n = (D.c2?.items || []).filter(c => c.status === 'online' && newHere('c2:' + c.ip));
+  if (c2n.length) { const fam = Object.entries(c2n.reduce((o, c) => (o[c.malware] = (o[c.malware] || 0) + 1, o), {})).sort((a, b) => b[1] - a[1]); add('med', `<b>${c2n.length}</b> botnet C2 server${c2n.length > 1 ? 's' : ''} came online · ${fam.slice(0, 3).map(([f, n]) => `${esc(f)} ×${n}`).join(', ')}`, Math.max(...c2n.map(c => FS['c2:' + c.ip])), { goto: 'c2' }); }
+  // news
+  const nw = (D.news?.items || []).filter(n => inHour(n.published));
+  for (const n of nw.filter(n => n.tags.includes('zero-day')).slice(0, 2)) add('high', `Zero-day report: <b>${esc(n.title)}</b> · ${esc(n.source)}`, n.published, { open: safeUrl(n.link) });
+  for (const n of nw.filter(n => !n.tags.includes('zero-day') && (n.tags.includes('apt') || n.tags.includes('ransomware'))).slice(0, 2)) add('info', `${esc(n.source)}: ${esc(n.title)}`, n.published, { open: safeUrl(n.link) });
+  if (nw.length) add('info', `<b>${nw.length}</b> new intel report${nw.length > 1 ? 's' : ''} on the wire`, nw[0].published, { goto: 'news' });
+  // threat level
+  const p = pressure(), prev = pressureHourAgo();
+  if (p.score != null && prev != null && Math.abs(p.score - prev) >= 3) {
+    const pn = prev < 20 ? 5 : prev < 40 ? 4 : prev < 60 ? 3 : prev < 80 ? 2 : 1, up = p.score > prev;
+    add(pn !== p.n ? (up ? 'crit' : 'ok') : up ? 'high' : 'ok', `Threat level ${pn !== p.n ? `moved <b>${pn} → ${p.n}</b> (${esc(p.lvl[0])})` : `${up ? 'rising' : 'easing'}: pressure <b>${prev} → ${p.score}</b>`}`, now, { goto: 'pressure' });
+  }
+  out.sort((a, b) => SEV_RANK[a.sev] - SEV_RANK[b.sev] || b.t - a.t);
+  return out;
+}
+const CHG = { list: [], i: 0, at: 0 };
+let chgTimer;
+function chgSoon() { clearTimeout(chgTimer); chgTimer = setTimeout(renderChanges, 400); }
+function renderChanges() {
+  const was = CHG.list[CHG.i]?.html;
+  CHG.list = changesModel();
+  const j = CHG.list.findIndex(c => c.html === was);
+  CHG.i = j >= 0 ? j : 0;
+  chgShow(j < 0);
+}
+function chgShow(anim) {
+  const el = $('#chg');
+  if (!el) return;
+  if (!CHG.list.length) { el.innerHTML = `<span class="chg-quiet"><i class="sv sv-ok"></i>Quiet hour: no new claims, KEV additions, critical CVEs or outages in the last 60 minutes</span>`; return; }
+  const c = CHG.list[CHG.i % CHG.list.length], n = CHG.list.length;
+  const age = Math.max(0, Math.round((Date.now() - c.t) / 60000));
+  el.innerHTML = `<div class="chg-item ${anim ? 'in' : ''} ${c.act ? 'click' : ''}" data-chg="${CHG.i % n}"><i class="sv sv-${c.sev}"></i><span class="chg-t">${c.html}</span><span class="chg-ago">${age < 1 ? 'now' : age + 'm ago'}</span></div><span class="chg-n">${CHG.i % n + 1}/${n}</span>`;
+  CHG.at = Date.now();
+}
+setInterval(() => { if (document.hidden) return; if (CHG.list.length > 1 && Date.now() - CHG.at > 6500) { CHG.i = (CHG.i + 1) % CHG.list.length; chgShow(true); } }, 500);
+setInterval(renderChanges, 60000);
+document.addEventListener('click', e => {
+  const it = e.target.closest('[data-chg]');
+  if (!it) return;
+  const a = CHG.list[+it.dataset.chg]?.act;
+  if (!a) return;
+  if (a.fly && map) flyTo(a.fly.lon, a.fly.lat, 4.5);
+  else if (a.open && safeUrl(a.open)) window.open(a.open, '_blank', 'noopener,noreferrer');
+  else if (a.goto) gotoPanel(a.goto);
+});
+
+/* ------------------------------------------------------------ idle story mode */
+// When nobody has touched the screen for a few minutes (Customise > Story mode, off by default), KESTREL tells a
+// story with the live data. The Map screen flies between the current hotspots with a caption; Analytics
+// spotlights each panel in turn and moves on to the next preset; MITRE spotlights its panels. Any click, key,
+// touch or wheel ends it at once. T starts it straight away.
+const STORY_KEY = 'kestrel.story.v2'; // v2: story mode is off unless switched on in Customise
+const ST = { min: 0, on: false, stops: [], i: -1, next: 0, started: 0, dur: 0 };
+try { Object.assign(ST, { min: JSON.parse(localStorage.getItem(STORY_KEY) || '{"min":0}').min ?? 0 }); } catch { /* private mode */ }
+const STORY_MAP_MS = 14000, STORY_PANEL_MS = 11000;
+function storyMapStops() {
+  const p = pressure(), stops = [];
+  const cname = c => COUNTRY_NAME[c] || c;
+  stops.push({ k: 'Global picture', t: `Threat level ${p.n ?? '–'} · ${p.lvl[0]}`, s: [D.ransomware && `${D.ransomware.last24h} ransomware claims in 24h`, D.outages && `${D.outages.ongoing} internet outages live`, D.c2 && `${D.c2.online} botnet C2 online`, D.kev && `${D.kev.added7} KEV additions this week`].filter(Boolean).join(' · '), world: true });
+  const rv = D.ransomware?.items?.find(v => v.geo);
+  if (rv) stops.push({ k: 'Latest ransomware claim', t: `${rv.group} claims ${rv.victim}`, s: [rv.sector, cname(rv.cc), ago(rv.discovered) + ' ago'].filter(Boolean).join(' · '), geo: rv.geo, z: 4, sev: 'crit' });
+  const top = D.ransomware?.countries?.[0];
+  if (top && COUNTRY_CENTER[top[0]]) {
+    const gs = Object.entries((D.ransomware.items || []).filter(v => v.cc === top[0]).reduce((o, v) => (o[v.group] = (o[v.group] || 0) + 1, o), {})).sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => x[0]);
+    stops.push({ k: 'Most targeted country · 4 days', t: `${cname(top[0])}: ${top[1]} ransomware victims`, s: gs.length ? 'Groups behind it: ' + gs.join(', ') : '', geo: { lat: COUNTRY_CENTER[top[0]][0], lon: COUNTRY_CENTER[top[0]][1] }, z: 3, sev: 'high' });
+  }
+  const out = (D.outages?.items || []).filter(o => o.ongoing && o.geo).sort((a, b) => b.score - a.score)[0];
+  if (out) stops.push({ k: 'Internet disruption', t: `${out.name} is losing connectivity`, s: `Ongoing for ${ago(out.startIso)} · seen by ${out.sources.join(', ')}`, geo: out.geo, z: 4.2, sev: 'crit' });
+  const cnt = {};
+  for (const arr of [D.attackers?.items, D.attackers?.compromised, D.c2?.items, D.phishing?.items]) for (const x of arr || []) if (x.geo?.cc) cnt[x.geo.cc] = (cnt[x.geo.cc] || 0) + 1;
+  const hot = Object.entries(cnt).sort((a, b) => b[1] - a[1])[0];
+  if (hot && COUNTRY_CENTER[hot[0]]) stops.push({ k: 'Hostile infrastructure hotspot', t: `${cname(hot[0])}: ${hot[1]} hostile hosts`, s: 'Scanners, compromised hosts, C2 servers and phishing sites located there', geo: { lat: COUNTRY_CENTER[hot[0]][0], lon: COUNTRY_CENTER[hot[0]][1] }, z: 3.2, sev: 'high' });
+  const c2 = D.c2?.items?.find(c => c.status === 'online' && c.geo);
+  if (c2) stops.push({ k: 'Botnet command server online', t: `${c2.malware} C2 at ${c2.ip}:${c2.port}`, s: loc(c2.geo) + (c2.asName ? ' · ' + c2.asName : ''), geo: c2.geo, z: 4.6, sev: 'high' });
+  const at = D.attackers?.items?.find(a => a.geo);
+  if (at) stops.push({ k: 'Busiest scanning source', t: `${at.ip} · ${fmtN(at.reports)} reports`, s: loc(at.geo) + (at.geo?.isp ? ' · ' + at.geo.isp : ''), geo: at.geo, z: 4.6, sev: 'high' });
+  return stops.map(x => Object.assign(x, { ms: STORY_MAP_MS }));
+}
+function storyPanelStops() {
+  return $$('#dock .panel:not(.collapsed)').map(el => ({ el, k: VIEW_BY[VIEW]?.label || 'Analytics', t: $('h3', el)?.textContent || '', ms: STORY_PANEL_MS }));
+}
+function storyCaption(stop, n) {
+  let cap = $('#storyCap');
+  if (SCREEN !== 'face') return;
+  if (!cap) { cap = document.createElement('div'); cap.id = 'storyCap'; $('#mapwrap').appendChild(cap); }
+  cap.innerHTML = `<div class="sc-k"><span class="sc-live"></span>Story mode · ${ST.i + 1}/${n}<button data-story-stop title="Stop the story (any key or click also stops it)">✕</button></div><div class="sc-h">${esc(stop.k)}</div><div class="sc-t">${esc(stop.t)}</div>${stop.s ? `<div class="sc-s">${esc(stop.s)}</div>` : ''}<div class="sc-bar"><span style="animation-duration:${stop.ms}ms"></span></div>`;
+  cap.classList.remove('in'); void cap.offsetWidth; cap.classList.add('in');
+}
+function storyBadge() {
+  let b = $('#storyBadge');
+  if (!b) { b = document.createElement('button'); b.id = 'storyBadge'; b.title = 'Story mode is running. Click, or press any key, to stop it.'; b.setAttribute('data-story-stop', ''); $('.tb-right')?.prepend(b); }
+  b.classList.toggle('on', ST.on);
+  const st = ST.stops[ST.i];
+  b.innerHTML = ST.on ? `<span class="sc-live"></span>Story<small>${st ? `${ST.i + 1}/${ST.stops.length}` : ''}</small>` : '';
+  if (st) b.title = `Story mode: ${SCREEN === 'face' ? st.k : st.t}. Click, or press any key, to stop it.`;
+}
+function storyStep() {
+  if (SCREEN === 'analytics' && ST.i >= ST.stops.length - 1 && ST.stops.length) {
+    // end of this preset: move to the next one and pick up its panels once they are drawn
+    const k = CYCLE_VIEWS.indexOf(VIEW);
+    goView(CYCLE_VIEWS[(k + 1) % CYCLE_VIEWS.length]);
+    lastInput = Math.min(lastInput, ST.started - 1);
+    ST.stops = []; ST.i = -1; ST.next = Date.now() + 1500;
+    return;
+  }
+  if (!ST.stops.length || ST.i >= ST.stops.length - 1) { ST.stops = SCREEN === 'face' ? storyMapStops() : storyPanelStops(); ST.i = -1; }
+  if (!ST.stops.length) { ST.next = Date.now() + 5000; return; }
+  ST.i++;
+  const stop = ST.stops[ST.i];
+  ST.next = Date.now() + stop.ms;
+  $$('.panel.spot').forEach(el => el.classList.remove('spot'));
+  if (SCREEN === 'face') {
+    if (stop.world) fitWorld(2400);
+    else if (map) map.flyTo({ center: [stop.geo.lon, stop.geo.lat], zoom: stop.z, speed: 0.7, curve: 1.5, essential: true });
+    if (stop.geo) setTimeout(() => { if (ST.on && ST.stops[ST.i] === stop) shock({ geo: stop.geo }, stop.sev || 'high'); }, 2600);
+    storyCaption(stop, ST.stops.length);
+  } else if (stop.el?.isConnected) {
+    stop.el.classList.add('spot');
+    stop.el.scrollIntoView({ behavior: REDUCED_MOTION ? 'auto' : 'smooth', block: 'center' });
+  }
+  storyBadge();
+}
+function storyStart() {
+  if (ST.on || isPhone()) return;
+  ST.on = true; ST.started = Date.now(); ST.stops = []; ST.i = -1; ST.next = 0;
+  document.body.classList.add('story-on');
+  storyStep();
+}
+function storyStop() {
+  if (!ST.on) return;
+  ST.on = false;
+  document.body.classList.remove('story-on');
+  $$('.panel.spot').forEach(el => el.classList.remove('spot'));
+  $('#storyCap')?.remove();
+  storyBadge();
+}
+function setStory(min) {
+  ST.min = +min || 0;
+  try { localStorage.setItem(STORY_KEY, JSON.stringify({ min: ST.min })); } catch { /* private mode */ }
+  if (!ST.min) storyStop();
+}
+setInterval(() => {
+  if (ST.on) {
+    if (lastInput > ST.started || !ST.min && !ST.manual || $('#drawer')?.classList.contains('open')) { ST.manual = false; return storyStop(); }
+    if (Date.now() >= ST.next) storyStep();
+    return;
+  }
+  if (!ST.min || document.hidden || !$('#boot')?.classList.contains('done') || $('#drawer')?.classList.contains('open')) return;
+  if (Date.now() - Math.max(lastInput, BOOTED_AT) >= ST.min * 60000) storyStart();
+}, 1000);
+document.addEventListener('click', e => { if (e.target.closest('[data-story-stop]')) { e.stopPropagation(); storyStop(); lastInput = Date.now(); } }, true);
+const BOOTED_AT = Date.now();
+
 /* ---------------------------------------------------------------- map */
 const COLORS = {};
 const FEAT = {}, LAYER_FC = {};
 const pointSize = (L, base) => ['interpolate', ['linear'], ['zoom'], 1, ['*', ['get', 'sz'], base], 5, ['*', ['get', 'sz'], base * 2], 10, ['*', ['get', 'sz'], base * 3]];
 const LAYERS = [
+  { id: 'night', name: 'Day / night terminator', kind: 'overlay', shape: 'half', color: '--dim' },
   { id: 'cables', name: 'Submarine cables', kind: 'line', color: '--cable' },
   { id: 'heat', name: 'Threat density heatmap', kind: 'heat', color: '--high' },
   { id: 'outages', name: 'Internet outages', feed: 'outages', kind: 'ring', color: '--outage', items: d => d.items, size: o => Math.max(1, Math.min(4, Math.log10(o.score + 10) - 1.5)), fresh: o => o.ongoing, label: o => `Outage · ${o.name}` },
   { id: 'tor', name: 'Tor exit nodes', feed: 'tor', color: '--tor', base: 1.6, items: d => d.items, label: x => `Tor exit · ${x.ip}` },
   { id: 'compromised', name: 'Compromised hosts (ET)', feed: 'attackers', color: '--comp', base: 2, items: d => d.compromised, label: x => `Compromised · ${x.ip}` },
   { id: 'phishing', name: 'Phishing hosting', feed: 'phishing', color: '--phish', base: 2.3, items: d => d.items, label: x => `Phish · ${x.host}` },
-  { id: 'urlhaus', name: 'Malware URLs (URLhaus)', feed: 'urlhaus', color: '--uh', base: 2.3, key: true, items: d => d.items, label: x => `URLhaus · ${x.host}` },
-  { id: 'threatfox', name: 'IOCs (ThreatFox)', feed: 'threatfox', color: '--tfox', base: 2.3, key: true, items: d => d.items, label: x => `${x.malware} · ${x.type}` },
+  { id: 'urlhaus', name: 'Malware URLs (URLhaus)', feed: 'urlhaus', color: '--uh', base: 2.3, items: d => d.items, label: x => `URLhaus · ${x.host}` },
+  { id: 'threatfox', name: 'C2 servers (C2IntelFeeds)', feed: 'threatfox', color: '--tfox', base: 2.3, items: d => d.items, label: x => `${x.malware} · ${x.type}` },
   { id: 'attackers', name: 'Top attackers (DShield)', feed: 'attackers', color: '--attk', base: 2.4, items: d => d.items, size: a => 1 + Math.min(2.2, a.reports / 120000), label: x => `Attacker #${x.rank} · ${x.ip}` },
   { id: 'c2', name: 'Botnet C2 servers', feed: 'c2', color: '--c2', base: 3.2, items: d => d.items, fresh: c => c.status === 'online', label: x => `${x.malware} C2 · ${x.ip}` },
   { id: 'ransomware', name: 'Ransomware victims', feed: 'ransomware', color: '--ransom', base: 3, items: d => d.items, fresh: r => Date.now() - Date.parse(r.discovered) < 86400e3, label: x => `${x.group} → ${x.victim}` },
+  { id: 'trails', name: 'Ransomware campaign trails', kind: 'overlay', shape: 'line', color: '--ransom' },
 ];
 const LAYER = Object.fromEntries(LAYERS.map(l => [l.id, l]));
 const BASE_PAINT = {
-  satellite: { 'raster-saturation': -0.2, 'raster-brightness-max': 0.82, 'raster-contrast': 0.05 },
-  muted: { 'raster-saturation': -0.9, 'raster-brightness-max': 0.5, 'raster-contrast': 0.15 },
+  // greyscale: fully desaturated so the coloured threat layers and attack paths stand out
+  satellite: { 'raster-saturation': -1, 'raster-brightness-max': 0.78, 'raster-contrast': 0.12 },
+  muted: { 'raster-saturation': -1, 'raster-brightness-max': 0.48, 'raster-contrast': 0.18 },
 };
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/';
-let map, hoverPop, invMarker, mapReady = false;
+// "Country outlines" base: no imagery and no labels, just low-detail Natural Earth shapes (world-atlas, 1:110m)
+// on a flat dark sea. Tiny islands are dropped so the map stays clean. Loaded once, the first time it's shown.
+const OUTLINE_SRC = ['https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json', 'https://unpkg.com/world-atlas@2.0.2/countries-110m.json'];
+const OUTLINE_LAYERS = ['ol-land', 'ol-coast-glow', 'ol-coast', 'ol-borders'];
+const OUTLINE_MIN_AREA = 1.5; // square degrees of bounding box; smaller islands are left off
+const IMAGERY_BASES = ['satellite', 'muted', 'dark'];
+let outlinesLoaded = false;
+// minimal TopoJSON -> GeoJSON (quantized arcs, Polygon / MultiPolygon only)
+function topoToGeo(topo, name) {
+  const t = topo.transform;
+  const arcs = topo.arcs.map(a => { let x = 0, y = 0; return t ? a.map(p => [(x += p[0]) * t.scale[0] + t.translate[0], (y += p[1]) * t.scale[1] + t.translate[1]]) : a; });
+  // world-atlas is spherical, so shapes that cross the date line (Russia, Fiji, Antarctica) jump from +180 to -180;
+  // unwrap each ring so it stays continuous, otherwise a flat map draws a line straight across the world
+  const ring = ids => {
+    const out = [];
+    for (const i of ids) { const a = i < 0 ? arcs[~i].slice().reverse() : arcs[i]; for (let k = out.length ? 1 : 0; k < a.length; k++) out.push(a[k]); }
+    for (let k = 1; k < out.length; k++) { let x = out[k][0]; const px = out[k - 1][0]; while (x - px > 180) x -= 360; while (x - px < -180) x += 360; if (x !== out[k][0]) out[k] = [x, out[k][1]]; }
+    return out;
+  };
+  const big = rings => { const r = rings[0]; let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9; for (const [x, y] of r) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } return (x1 - x0) * (y1 - y0) >= OUTLINE_MIN_AREA; };
+  const geom = g => {
+    const polys = (g.type === 'Polygon' ? [g.arcs] : g.type === 'MultiPolygon' ? g.arcs : []).map(p => p.map(ring)).filter(big);
+    return polys.length ? { type: 'MultiPolygon', coordinates: polys } : null;
+  };
+  const o = topo.objects[name];
+  const gs = o.type === 'GeometryCollection' ? o.geometries : [o];
+  return { type: 'FeatureCollection', features: gs.map(g => ({ type: 'Feature', properties: { name: g.properties?.name || '' }, geometry: geom(g) })).filter(f => f.geometry) };
+}
+async function loadOutlines() {
+  if (outlinesLoaded) return;
+  outlinesLoaded = true;
+  for (const u of OUTLINE_SRC) {
+    try {
+      const r = await fetch(u);
+      if (!r.ok) continue;
+      const topo = await r.json();
+      map.getSource('ol-countries')?.setData(topoToGeo(topo, 'countries'));
+      map.getSource('ol-landmass')?.setData(topoToGeo(topo, 'land'));
+      return;
+    } catch (e) { console.warn('outlines', u, e); }
+  }
+  outlinesLoaded = false;
+  toast('Could not load the country outlines. Check your connection and try again.');
+}
+function outlinePaint() {
+  // follows the theme: land is the panel colour, coastlines pick up a faint accent glow
+  const set = (id, k, v) => map.getLayer(id) && map.setPaintProperty(id, k, v);
+  set('ol-land', 'fill-color', css('--panel2') || '#1a1a1d');
+  set('ol-coast-glow', 'line-color', css('--acc') || '#f5a524');
+  set('ol-coast', 'line-color', css('--dim') || '#9a9aa2');
+  set('ol-borders', 'line-color', css('--dim') || '#9a9aa2');
+}
+let map, hoverPop, mapReady = false;
 
 function initMap() {
   for (const L of LAYERS) COLORS[L.id] = css(L.color);
   map = new maplibregl.Map({
-    container: 'map', center: [12, 24], zoom: 1.6, minZoom: 0.6, maxPitch: 0, pitchWithRotate: false, dragRotate: false, touchPitch: false,
+    container: 'map', center: isPhone() ? [15, 22] : [12, 24], zoom: isPhone() ? 0.3 : 1.6, minZoom: isPhone() ? 0 : 0.6, maxPitch: 0, pitchWithRotate: false, dragRotate: false, touchPitch: false,
     renderWorldCopies: true, attributionControl: false, fadeDuration: 0,
     style: {
       version: 8,
@@ -569,12 +1064,18 @@ function initMap() {
         sat: { type: 'raster', tiles: [ESRI + 'World_Imagery/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19, attribution: 'Imagery © Esri, Maxar, Earthstar Geographics, GIS User Community' },
         dark: { type: 'raster', tiles: [ESRI + 'Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 16, attribution: '© Esri' },
         ref: { type: 'raster', tiles: [ESRI + 'Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'], tileSize: 256, maxzoom: 19 },
+        'ol-countries': { type: 'geojson', data: { type: 'FeatureCollection', features: [] }, attribution: 'Outlines: Natural Earth' },
+        'ol-landmass': { type: 'geojson', data: { type: 'FeatureCollection', features: [] } },
       },
       layers: [
-        { id: 'bg', type: 'background', paint: { 'background-color': '#01040a' } },
+        { id: 'bg', type: 'background', paint: { 'background-color': '#050506' } },
         { id: 'sat', type: 'raster', source: 'sat' },
-        { id: 'dark', type: 'raster', source: 'dark', layout: { visibility: 'none' } },
-        { id: 'ref', type: 'raster', source: 'ref', paint: { 'raster-opacity': 0.75 } },
+        { id: 'dark', type: 'raster', source: 'dark', layout: { visibility: 'none' }, paint: { 'raster-saturation': -1 } },
+        { id: 'ol-land', type: 'fill', source: 'ol-landmass', layout: { visibility: 'none' }, paint: { 'fill-color': '#141416', 'fill-opacity': 0.9, 'fill-antialias': true } },
+        { id: 'ol-coast-glow', type: 'line', source: 'ol-landmass', layout: { visibility: 'none', 'line-join': 'round' }, paint: { 'line-color': '#f5a524', 'line-opacity': 0.14, 'line-blur': 3, 'line-width': ['interpolate', ['linear'], ['zoom'], 1, 3, 6, 7] } },
+        { id: 'ol-coast', type: 'line', source: 'ol-landmass', layout: { visibility: 'none', 'line-join': 'round' }, paint: { 'line-color': '#9a9aa2', 'line-opacity': 0.85, 'line-width': ['interpolate', ['linear'], ['zoom'], 1, 0.9, 6, 1.8] } },
+        { id: 'ol-borders', type: 'line', source: 'ol-countries', layout: { visibility: 'none', 'line-join': 'round' }, paint: { 'line-color': '#9a9aa2', 'line-opacity': 0.26, 'line-width': ['interpolate', ['linear'], ['zoom'], 1, 0.4, 6, 0.9] } },
+        { id: 'ref', type: 'raster', source: 'ref', paint: { 'raster-opacity': 0.75, 'raster-saturation': -1 } },
       ],
     },
   });
@@ -582,6 +1083,8 @@ function initMap() {
   map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'bottom-right');
   map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }), 'bottom-right');
   map.touchZoomRotate.disableRotation();
+  // phones: start with the map attribution folded away (tap the (i) to read it)
+  if (isPhone()) map.once('load', () => $('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
   hoverPop = new maplibregl.Popup({ closeButton: false, closeOnClick: false, className: 'hover-tip', offset: 10 });
 
   map.on('load', () => {
@@ -589,7 +1092,9 @@ function initMap() {
     fitWorld(0);
     applyBase();
     const empty = { type: 'FeatureCollection', features: [] };
+    addNight();
     for (const L of LAYERS) {
+      if (L.kind === 'overlay') continue;
       map.addSource(L.id, { type: 'geojson', data: empty });
       const vis = S.layers[L.id] ? 'visible' : 'none';
       const c = COLORS[L.id];
@@ -620,10 +1125,13 @@ function initMap() {
     map.on('mouseenter', 'cables', e => { map.getCanvas().style.cursor = 'crosshair'; hoverPop.setLngLat(e.lngLat).setHTML('Cable · ' + esc(e.features[0].properties.name)).addTo(map); });
     map.on('mousemove', 'cables', e => hoverPop.setLngLat(e.lngLat).setHTML('Cable · ' + esc(e.features[0].properties.name)));
     map.on('mouseleave', 'cables', () => { map.getCanvas().style.cursor = ''; hoverPop.remove(); });
+    addArcLayers();
     for (const L of LAYERS) if (L.feed && D[L.feed]) updateLayer(L.id);
     updateLayer('heat');
     loadCables();
+    buildArcs();
     requestAnimationFrame(pulse);
+    requestAnimationFrame(arcLoop);
   });
   map.on('mousemove', e => { $('#hudCoords').textContent = `${e.lngLat.lat.toFixed(3)}°, ${e.lngLat.lng.toFixed(3)}°`; });
 }
@@ -650,7 +1158,6 @@ function updateLayer(id) {
     return;
   }
   if (!L.feed || !D[L.feed]) return;
-  if (D[L.feed].needsKey) { L.locked = true; renderLayerList(); return; }
   const items = L.items(D[L.feed]) || [];
   const feats = [];
   FEAT[id] = [];
@@ -669,19 +1176,35 @@ function updateLayer(id) {
 }
 
 function renderLayerList() {
+  renderMapKey();
   const el = $('#layerList');
   if (!el) return;
   el.innerHTML = [...LAYERS].reverse().map(L => {
-    const shape = L.kind === 'line' ? 'line' : L.kind === 'ring' ? 'ring' : '';
-    const locked = L.key && D[L.feed]?.needsKey;
-    return `<div class="lyr ${S.layers[L.id] && !locked ? '' : 'off'} ${locked ? 'locked' : ''}" data-layer="${L.id}"><span class="sw ${shape}" style="color:${css(L.color)}"></span><span class="nm">${esc(L.name)}</span><span class="ct">${L.count != null ? fmtN(L.count) : ''}</span></div>`;
+    const shape = L.shape || (L.kind === 'line' ? 'line' : L.kind === 'ring' ? 'ring' : '');
+    return `<div class="lyr ${S.layers[L.id] ? '' : 'off'}" data-layer="${L.id}"><span class="sw ${shape}" style="color:${css(L.color)}"></span><span class="nm">${esc(L.name)}</span><span class="ct">${L.count != null ? fmtN(L.count) : ''}</span></div>`;
   }).join('');
+}
+
+// Small key in the map's top-left corner: one row per layer that is switched on and has something on the map
+const KEY_NAMES = { ransomware: 'Ransomware victim', trails: 'Ransomware trail (same group)', c2: 'Botnet C2 (Feodo)', threatfox: 'C2 server (C2IntelFeeds)',
+  attackers: 'Top scanner (DShield)', compromised: 'Compromised host', phishing: 'Phishing host', urlhaus: 'Malware URL host', tor: 'Tor exit node',
+  outages: 'Internet outage', cables: 'Submarine cable', heat: 'Threat density' };
+function renderMapKey() {
+  const el = $('#mapKey');
+  if (!el) return;
+  const rows = [...LAYERS].reverse().filter(L => KEY_NAMES[L.id] && S.layers[L.id] && (L.count == null || L.count > 0)).map(L => {
+    const shape = L.shape || (L.kind === 'line' ? 'line' : L.kind === 'ring' ? 'ring' : L.kind === 'heat' ? 'heat' : 'dot');
+    return `<div class="mk-r"><i class="mk-${shape}" style="color:${css(L.color)}"></i>${esc(KEY_NAMES[L.id])}</div>`;
+  });
+  el.innerHTML = rows.length ? `<b>Key</b>${rows.join('')}` : '';
+  el.hidden = !rows.length;
 }
 function setLayerVis(id, on) {
   S.layers[id] = on; save();
   if (!map) return;
   const vis = on ? 'visible' : 'none';
-  for (const suf of ['', '-glow', '-pulse']) if (map.getLayer(id + suf)) map.setLayoutProperty(id + suf, 'visibility', vis);
+  for (const suf of ['', '-glow', '-pulse', '-edge']) if (map.getLayer(id + suf)) map.setLayoutProperty(id + suf, 'visibility', vis);
+  if (id === 'paths' || id === 'trails') buildArcs();
   renderLayerList();
 }
 
@@ -707,10 +1230,176 @@ function pulse(t) {
   setTimeout(() => requestAnimationFrame(pulse), 50);
 }
 
+/* ---------------------------------------------- attack paths & live overlays */
+// Every arc comes from real feed data, nothing is invented:
+//  The feeds only say where a threat is, never who it hit, so no arc is drawn from a threat to a target. The only
+//  arcs are ransomware trails, which join two real, posted victims of the same group in the order they were posted.
+//  trails - each ransomware group's victims in the order they were posted over the last 72h (its campaign path)
+//  night  - the real-time day/night terminator
+const ARC_MAX_PATHS = 36, ARC_TRAIL_HOURS = 72, ARC_MAX_TRAILS = 60, ARC_MAX_SHOTS = 14;
+const ARC = { paths: [], trails: [], shots: [], victims: {} };
+const REDUCED_MOTION = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+// Curved arc between two [lon, lat] points on the flat map, taking the short way round and bowing toward the pole
+function arcCoords(a, b, n = 40) {
+  const [x1, y1] = a;
+  let [x2, y2] = b;
+  if (x2 - x1 > 180) x2 -= 360; else if (x2 - x1 < -180) x2 += 360;
+  const dx = x2 - x1, dy = y2 - y1, d = Math.hypot(dx, dy);
+  if (d < 1.2) return null;
+  const s = dx >= 0 ? 1 : -1, bend = Math.min(d * 0.24, 28);
+  const cx = (x1 + x2) / 2 - dy / d * bend * s, cy = Math.max(-80, Math.min(80, (y1 + y2) / 2 + dx / d * bend * s));
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const t = i / n, u = 1 - t;
+    pts.push([u * u * x1 + 2 * u * t * cx + t * t * x2, Math.max(-84, Math.min(84, u * u * y1 + 2 * u * t * cy + t * t * y2))]);
+  }
+  return pts;
+}
+function arcAt(c, f) {
+  const n = c.length - 1, x = Math.max(0, Math.min(1, f)) * n, i = Math.min(Math.floor(x), n - 1), k = x - i;
+  return [c[i][0] + (c[i + 1][0] - c[i][0]) * k, c[i][1] + (c[i + 1][1] - c[i][1]) * k];
+}
+function arcSlice(c, f0, f1) {
+  f0 = Math.max(0, f0); f1 = Math.min(1, f1);
+  if (f1 - f0 < 0.002) return null;
+  const n = c.length - 1, out = [arcAt(c, f0)];
+  for (let i = Math.ceil(f0 * n); i < f1 * n; i++) if (i / n > f0) out.push(c[i]);
+  out.push(arcAt(c, f1));
+  return out;
+}
+const kindColor = k => css((LF_KINDS[k]?.color || 'var(--acc)').slice(4, -1));
+
+function buildArcs() {
+  if (!mapReady || !map.getSource('arc-base')) return;
+  ARC.paths = [];
+  // ransomware campaign trails: victim -> next victim, per group, in posting order
+  ARC.trails = []; ARC.victims = {};
+  const since = Date.now() - ARC_TRAIL_HOURS * 3600e3;
+  for (const v of D.ransomware?.items || []) {
+    if (!v.geo || v.geo.lat == null || !(Date.parse(v.discovered) > since)) continue;
+    (ARC.victims[v.group] = ARC.victims[v.group] || []).push(v);
+  }
+  const legs = [];
+  for (const [g, list] of Object.entries(ARC.victims)) {
+    list.sort((x, y) => Date.parse(x.discovered) - Date.parse(y.discovered));
+    for (let i = 1; i < list.length; i++) {
+      const p = list[i - 1], q = list[i];
+      if (p.cc && p.cc === q.cc) continue;
+      legs.push({ g, p, q, t: Date.parse(q.discovered) });
+    }
+  }
+  legs.sort((x, y) => y.t - x.t);
+  if (S.layers.trails) for (const L of legs.slice(0, ARC_MAX_TRAILS)) {
+    const c = arcCoords([L.p.geo.lon, L.p.geo.lat], [L.q.geo.lon, L.q.geo.lat]);
+    if (c) ARC.trails.push({ c, col: COLORS.ransomware || css('--ransom'), w: 1.3, dur: 3400 + Math.random() * 2400, off: Math.random(), ring: true,
+      label: `${L.g}: ${L.p.victim} (${L.p.cc || '?'}) → ${L.q.victim} (${L.q.cc || '?'})` });
+  }
+  LAYER.trails.count = ARC.trails.length;
+  const feats = [...ARC.paths, ...ARC.trails].map(a => ({ type: 'Feature', geometry: { type: 'LineString', coordinates: a.c }, properties: { c: a.col, w: a.w, label: a.label } }));
+  map.getSource('arc-base').setData({ type: 'FeatureCollection', features: feats });
+  renderLayerList();
+}
+
+// One-shot arc when the Live Threat Feed streams a ransomware claim: from the same group's previous victim to this one
+function arcShot(e) {
+  if (!mapReady || !S.layers.trails || REDUCED_MOTION || !e.geo || e.geo.lat == null) return;
+  let from, to;
+  if (e.kind === 'ransom') {
+    const [grp, victim] = e.id.slice(2).split('|');
+    const list = ARC.victims[grp] || [];
+    const i = list.findIndex(v => v.victim === victim);
+    if (i < 1 || !list[i - 1].geo) return;
+    from = [list[i - 1].geo.lon, list[i - 1].geo.lat]; to = [e.geo.lon, e.geo.lat];
+  } else return;
+  const c = arcCoords(from, to);
+  if (!c) return;
+  if (ARC.shots.length >= ARC_MAX_SHOTS) ARC.shots.shift();
+  ARC.shots.push({ c, col: kindColor(e.kind), w: 2.2, start: performance.now(), dur: 1500 + Math.min(1500, Math.hypot(to[0] - from[0], to[1] - from[1]) * 9) });
+}
+
+function addArcLayers() {
+  const empty = { type: 'FeatureCollection', features: [] };
+  map.addSource('arc-base', { type: 'geojson', data: empty });
+  map.addSource('arc-trail', { type: 'geojson', data: empty });
+  map.addSource('arc-head', { type: 'geojson', data: empty });
+  map.addLayer({ id: 'arc-base', type: 'line', source: 'arc-base', layout: { 'line-cap': 'round' }, paint: { 'line-color': ['get', 'c'], 'line-opacity': 0.16, 'line-width': ['get', 'w'], 'line-dasharray': [1, 2.5] } });
+  map.addLayer({ id: 'arc-glow', type: 'line', source: 'arc-trail', layout: { 'line-cap': 'round' }, paint: { 'line-color': ['get', 'c'], 'line-opacity': ['*', ['get', 'o'], 0.35], 'line-width': ['*', ['get', 'w'], 4], 'line-blur': 4 } });
+  map.addLayer({ id: 'arc-trail', type: 'line', source: 'arc-trail', layout: { 'line-cap': 'round' }, paint: { 'line-color': ['get', 'c'], 'line-opacity': ['get', 'o'], 'line-width': ['get', 'w'] } });
+  map.addLayer({ id: 'arc-ring', type: 'circle', source: 'arc-head', filter: ['==', ['get', 'k'], 'ring'], paint: { 'circle-radius': ['get', 'r'], 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': ['get', 'c'], 'circle-stroke-width': 1.4, 'circle-stroke-opacity': ['get', 'o'] } });
+  map.addLayer({ id: 'arc-headglow', type: 'circle', source: 'arc-head', filter: ['==', ['get', 'k'], 'head'], paint: { 'circle-radius': ['*', ['get', 'w'], 4.5], 'circle-color': ['get', 'c'], 'circle-opacity': 0.35, 'circle-blur': 1 } });
+  map.addLayer({ id: 'arc-head', type: 'circle', source: 'arc-head', filter: ['==', ['get', 'k'], 'head'], paint: { 'circle-radius': ['*', ['get', 'w'], 1.3], 'circle-color': '#ffffff', 'circle-stroke-color': ['get', 'c'], 'circle-stroke-width': 1.2 } });
+  map.on('mouseenter', 'arc-base', e => { map.getCanvas().style.cursor = 'crosshair'; hoverPop.setLngLat(e.lngLat).setHTML(esc(e.features[0].properties.label)).addTo(map); });
+  map.on('mousemove', 'arc-base', e => hoverPop.setLngLat(e.lngLat).setHTML(esc(e.features[0].properties.label)));
+  map.on('mouseleave', 'arc-base', () => { map.getCanvas().style.cursor = ''; hoverPop.remove(); });
+}
+
+// Comet heads with fading tails travel along each path; trails ring the victim on arrival
+const TAIL = 0.2, TAIL_STEPS = [0.12, 0.3, 0.55, 1];
+function cometFeats(a, f, trail, head, ring) {
+  for (let i = 0; i < TAIL_STEPS.length; i++) {
+    const seg = arcSlice(a.c, f - TAIL + TAIL * i / TAIL_STEPS.length, f - TAIL + TAIL * (i + 1) / TAIL_STEPS.length);
+    if (seg) trail.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: seg }, properties: { c: a.col, w: a.w, o: TAIL_STEPS[i] } });
+  }
+  if (f >= 0 && f <= 1) head.push({ type: 'Feature', geometry: { type: 'Point', coordinates: arcAt(a.c, f) }, properties: { k: 'head', c: a.col, w: a.w } });
+  if (ring != null) head.push({ type: 'Feature', geometry: { type: 'Point', coordinates: a.c[a.c.length - 1] }, properties: { k: 'ring', c: a.col, r: 3 + ring * 22, o: (1 - ring) * 0.9 } });
+}
+function arcLoop(now) {
+  if (mapReady && !document.hidden && !REDUCED_MOTION && map.getSource('arc-trail')) {
+    const trail = [], head = [];
+    for (const a of [...ARC.paths, ...ARC.trails]) {
+      const f = ((now / a.dur) + a.off) % 1 * 1.25; // 1..1.25 = pause at the target while the tail drains
+      const r = a.ring && f > 1 ? (f - 1) / 0.25 : null;
+      cometFeats(a, f, trail, head, r);
+    }
+    ARC.shots = ARC.shots.filter(s => (now - s.start) / s.dur < 1.5);
+    for (const s of ARC.shots) {
+      const f = (now - s.start) / s.dur;
+      cometFeats(s, f, trail, head, f > 1 ? (f - 1) / 0.5 : null);
+    }
+    map.getSource('arc-trail').setData({ type: 'FeatureCollection', features: trail });
+    map.getSource('arc-head').setData({ type: 'FeatureCollection', features: head });
+  }
+  setTimeout(() => requestAnimationFrame(arcLoop), 33);
+}
+
+// Real-time day/night terminator (solar declination + subsolar longitude from the current UTC time)
+function nightPolygon(date = new Date()) {
+  const rad = Math.PI / 180;
+  const start = Date.UTC(date.getUTCFullYear(), 0, 0), doy = (date - start) / 864e5;
+  const g = 2 * Math.PI / 365 * (doy - 1);
+  const eot = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  let dec = -23.44 * Math.cos(2 * Math.PI / 365 * (doy + 10));
+  if (Math.abs(dec) < 0.2) dec = dec < 0 ? -0.2 : 0.2;
+  const utcMin = date.getUTCHours() * 60 + date.getUTCMinutes() + date.getUTCSeconds() / 60;
+  const sunLon = -(utcMin + eot - 720) / 4;
+  const line = [];
+  for (let lon = -180; lon <= 180; lon += 2) line.push([lon, Math.atan(-Math.cos((lon - sunLon) * rad) / Math.tan(dec * rad)) / rad]);
+  const pole = dec > 0 ? -85 : 85;
+  return {
+    night: { type: 'Feature', geometry: { type: 'Polygon', coordinates: [[...line, [180, pole], [-180, pole], line[0]]] }, properties: {} },
+    edge: { type: 'Feature', geometry: { type: 'LineString', coordinates: line }, properties: {} },
+  };
+}
+function addNight() {
+  const { night, edge } = nightPolygon();
+  const vis = S.layers.night ? 'visible' : 'none';
+  map.addSource('night', { type: 'geojson', data: night });
+  map.addSource('night-edge', { type: 'geojson', data: edge });
+  map.addLayer({ id: 'night', type: 'fill', source: 'night', layout: { visibility: vis }, paint: { 'fill-color': '#000000', 'fill-opacity': 0.34, 'fill-antialias': false } });
+  map.addLayer({ id: 'night-edge', type: 'line', source: 'night-edge', layout: { visibility: vis }, paint: { 'line-color': css('--acc'), 'line-opacity': 0.22, 'line-width': 6, 'line-blur': 6 } });
+  setInterval(() => {
+    if (document.hidden || !map.getSource('night')) return;
+    const p = nightPolygon();
+    map.getSource('night').setData(p.night);
+    map.getSource('night-edge').setData(p.edge);
+  }, 60000);
+}
+
 function popupHTML(layerId, x) {
   const row = (k, v) => v == null || v === '' ? '' : `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`;
   const head = (title, color) => `<div class="pop-h"><span class="dot" style="color:${color}"></span>${esc(title)}</div>`;
-  const inv = ip => ip ? `<button class="btn" data-inv="${esc(ip)}">Investigate</button>` : '';
+  const inv = () => '';
   const link = (u, l) => safeUrl(u) ? `<a class="btn" href="${esc(u)}" target="_blank" rel="noopener noreferrer">${esc(l)} ↗</a>` : '';
   const c = COLORS[layerId];
   const g = x.geo || {};
@@ -721,7 +1410,7 @@ function popupHTML(layerId, x) {
     case 'compromised': return head('Compromised host', c) + `<div class="pop-b"><table>${row('IP', x.ip)}${row('ISP', g.isp)}${row('Location', loc(x.geo))}${row('Source', 'Emerging Threats compromised-IP list')}</table><div class="act">${inv(x.ip)}</div></div>`;
     case 'tor': return head('Tor exit node', c) + `<div class="pop-b"><table>${row('IP', x.ip)}${row('ISP', g.isp)}${row('Location', loc(x.geo))}</table><div class="act">${inv(x.ip)}${link('https://metrics.torproject.org/rs.html#search/' + encodeURIComponent(x.ip), 'Relay search')}</div></div>`;
     case 'phishing': return head('Phishing site', c) + `<div class="pop-b"><table>${row('URL', x.url)}${row('Host', x.host)}${row('IP', x.ip)}${row('Hosting', g.isp)}${row('Location', loc(x.geo))}</table><div class="act">${inv(x.ip)}</div></div>`;
-    case 'threatfox': return head(`${x.malware} IOC`, c) + `<div class="pop-b"><table>${row('IOC', x.ioc)}${row('Type', x.type)}${row('Threat', x.threat)}${row('Confidence', x.confidence + '%')}${row('Location', loc(x.geo))}${row('First seen', fmtTime(x.firstSeen))}</table><div class="act">${inv(x.ip)}</div></div>`;
+    case 'threatfox': return head(`${x.malware} IOC`, c) + `<div class="pop-b"><table>${row('IOC', x.ioc)}${row('Type', x.type)}${row('Threat', x.threat)}${row('Confidence', x.confidence + '%')}${row('Source', (x.tags || []).includes('verified') ? 'C2IntelFeeds (verified, 30 days)' : 'C2IntelFeeds (unverified scan hit)')}${row('Location', loc(x.geo))}${x.firstSeen ? row('First seen', fmtTime(x.firstSeen)) : ''}</table><div class="act">${inv(x.ip)}</div></div>`;
     case 'urlhaus': return head('Malware distribution URL', c) + `<div class="pop-b"><table>${row('URL', x.url)}${row('Status', x.status)}${row('Threat', x.threat)}${row('Tags', (x.tags || []).join(', '))}${row('Location', loc(x.geo))}</table><div class="act">${inv(x.ip)}</div></div>`;
     case 'outages': return head(`Internet outage · ${x.name}`, c) + `<div class="pop-b"><table>${row('Status', x.ongoing ? 'ONGOING' : 'recovered')}${row('Started', fmtTime(x.startIso))}${row('Duration', x.durationH + ' h')}${row('Signals', x.sources.join(', '))}${row('Severity score', fmtN(Math.round(x.score)))}</table><div class="act">${link('https://ioda.inetintel.cc.gatech.edu/country/' + encodeURIComponent(x.cc), 'IODA')}</div></div>`;
   }
@@ -744,30 +1433,38 @@ function fitWorld(duration = 800) {
   map.fitBounds([[-168, -56], [178, 76]], { padding: 12, duration });
 }
 function applyBase() {
+  syncOutlineBtn();
   if (!map?.getLayer('sat')) return;
-  const dark = S.base === 'dark';
-  map.setLayoutProperty('sat', 'visibility', dark ? 'none' : 'visible');
+  const dark = S.base === 'dark', outline = S.base === 'outline';
+  map.setLayoutProperty('sat', 'visibility', dark || outline ? 'none' : 'visible');
   map.setLayoutProperty('dark', 'visibility', dark ? 'visible' : 'none');
-  if (!dark) for (const [k, v] of Object.entries(BASE_PAINT[S.base] || BASE_PAINT.satellite)) map.setPaintProperty('sat', k, v);
-  map.setLayoutProperty('ref', 'visibility', S.labels ? 'visible' : 'none');
+  if (!dark && !outline) for (const [k, v] of Object.entries(BASE_PAINT[S.base] || BASE_PAINT.satellite)) map.setPaintProperty('sat', k, v);
+  for (const id of OUTLINE_LAYERS) map.setLayoutProperty(id, 'visibility', outline ? 'visible' : 'none');
+  if (outline) { outlinePaint(); loadOutlines(); }
+  // the outline map is deliberately bare: no place-label tiles on it (they bring their own borders and towns)
+  map.setLayoutProperty('ref', 'visibility', S.labels && !outline ? 'visible' : 'none');
+}
+// map HUD button: flips between country outlines and whichever imagery base was last used
+function syncOutlineBtn() {
+  const b = $('#btnOutline');
+  if (!b) return;
+  const on = S.base === 'outline';
+  b.classList.toggle('on', on);
+  b.textContent = on ? 'Outlines' : 'Imagery';
+  b.title = on ? 'Showing country outlines. Click for map imagery (O)' : 'Showing map imagery. Click for country outlines only (O)';
+}
+function toggleOutline() {
+  if (S.base === 'outline') S.base = IMAGERY_BASES.includes(S.lastBase) ? S.lastBase : 'satellite';
+  else { S.lastBase = S.base; S.base = 'outline'; }
+  save(); applyBase(); syncSegs?.();
 }
 
-/* ------------------------------------------------------------ investigate */
-async function investigate(ip) {
-  ip = (ip || '').trim();
-  if (!ip) return;
-  ps('investigate').q = ip; save();
-  gotoPanel('investigate');
-  INV = 'loading'; renderPanel('investigate');
-  try { INV = await (await fetch('/api/lookup?ip=' + encodeURIComponent(ip))).json(); } catch (e) { INV = { error: e.message }; }
-  renderPanel('investigate');
-  if (INV.geo && map) {
-    invMarker?.remove();
-    const el = document.createElement('div');
-    el.style.cssText = `width:18px;height:18px;border:2px solid var(--acc);border-radius:50%;box-shadow:0 0 12px var(--acc),inset 0 0 8px var(--acc);`;
-    invMarker = new maplibregl.Marker({ element: el }).setLngLat([INV.geo.lon, INV.geo.lat]).addTo(map);
-    flyTo(INV.geo.lon, INV.geo.lat, 5);
-  }
+/* ------------------------------------------- IP search (loaded feeds only) */
+function findLoadedIp(ip) {
+  const lists = [['c2', 'Feodo Tracker C2'], ['tor', 'Tor exit nodes'], ['phishing', 'OpenPhish'], ['threatfox', 'C2IntelFeeds'], ['urlhaus', 'URLhaus'], ['attackers', 'SANS ISC top attackers']];
+  for (const [f, label] of lists) { const it = (D[f]?.items || []).find(x => x.ip === ip); if (it) return { feed: label, geo: it.geo }; }
+  const c = (D.attackers?.compromised || []).find(x => x.ip === ip);
+  return c ? { feed: 'Emerging Threats compromised hosts', geo: c.geo } : null;
 }
 
 /* ------------------------------------------------------- layout & drawer */
@@ -801,16 +1498,16 @@ function syncSegs() {
 function buildDrawer() {
   $('#panelToggles').innerHTML = S.order.filter(id => PANEL[id]).map(id => {
     const p = PANEL[id];
-    return `<label class="ptog"><input type="checkbox" data-ptog="${id}" ${S.hidden[id] ? '' : 'checked'}><span class="nm">${esc(p.title)}</span>${p.keyed ? '<small>needs key</small>' : ''}</label>`;
+    return `<label class="ptog"><input type="checkbox" data-ptog="${id}" ${S.hidden[id] ? '' : 'checked'}><span class="nm">${esc(p.title)}</span></label>`;
   }).join('');
   syncSegs();
 }
 function renderHealth() {
   if (!STATUS) { $('#feedHealth').innerHTML = '<div class="err">server unreachable</div>'; return; }
   const rows = Object.entries(STATUS.feeds).map(([k, f]) => {
-    const keyed = D[k]?.needsKey;
-    const col = f.error ? 'var(--crit)' : keyed ? 'var(--mute)' : f.updated ? 'var(--low)' : 'var(--med)';
-    return `<div class="fh" title="${esc(f.error?.error || '')}"><span class="dotS" style="background:${col};margin:0"></span><span>${esc(f.source)}</span><span class="s">${keyed ? 'no key' : f.error ? 'error' : f.updated ? ago(f.updated) + ' ago' : '…'}</span></div>`;
+    const kept = f.error && f.updated;
+    const col = kept ? 'var(--med)' : f.error ? 'var(--crit)' : f.updated ? 'var(--low)' : 'var(--med)';
+    return `<div class="fh" title="${esc(f.error?.error || '')}"><span class="dotS" style="background:${col};margin:0"></span><span>${esc(f.source)}</span><span class="s">${kept ? `source error · showing data from ${ago(f.updated)} ago` : f.error ? 'error' : f.updated ? ago(f.updated) + ' ago' : '…'}</span></div>`;
   });
   rows.push(`<div class="fh"><span class="dotS" style="background:${STATUS.geo.error ? 'var(--crit)' : 'var(--low)'};margin:0"></span><span>ip-api geolocation</span><span class="s">${fmtN(STATUS.geo.known)} cached · ${STATUS.geo.pending} queued</span></div>`);
   $('#feedHealth').innerHTML = rows.join('');
@@ -838,18 +1535,18 @@ function wire() {
     const chip = t.closest('[data-chip]');
     if (chip) { const [pid, key, val] = chip.dataset.chip.split('|'); ps(pid)[key] = val; save(); renderPanel(pid); if (pid === 'livefeed' && key === 'speed') lfSchedule(); return; }
     if (t.closest('[data-lf="pause"]')) { LF.paused = !LF.paused; renderPanel('livefeed'); return; }
-    const inv = t.closest('[data-inv]');
-    if (inv && !t.closest('a')) { if (inv.dataset.inv && inv.dataset.inv !== 'null') investigate(inv.dataset.inv); return; }
     const fly = t.closest('[data-fly]');
     if (fly && !t.closest('a')) { const [lon, lat, z] = fly.dataset.fly.split(',').map(Number); flyTo(lon, lat, z || 4.2); return; }
     const open = t.closest('[data-open]');
     if (open && !t.closest('a')) { const u = safeUrl(open.dataset.open); if (u) window.open(u, '_blank', 'noopener,noreferrer'); return; }
+    const vw = t.closest('a[data-view]');
+    if (vw) { if (!e.ctrlKey && !e.metaKey && !e.shiftKey && (vw.dataset.view === VIEW || goView(vw.dataset.view))) e.preventDefault(); return; }
+    if (t.closest('#viewCycle')) { setCycle(CYC.min ? 0 : (CYC.last || 2)); return; }
     const go = t.closest('[data-goto]');
     if (go) { gotoPanel(go.dataset.goto); return; }
     const lyr = t.closest('[data-layer]');
     if (lyr) {
       const L = LAYER[lyr.dataset.layer];
-      if (L.key && D[L.feed]?.needsKey) { toast('Add an API key in config.json to enable this layer (see README).'); return; }
       setLayerVis(L.id, !S.layers[L.id]); return;
     }
   });
@@ -860,14 +1557,16 @@ function wire() {
     ps(pid)[key] = sel.value; save(); renderPanel(pid);
     if (pid === 'livefeed' && key === 'speed') lfSchedule();
   });
-  document.addEventListener('submit', e => {
-    if (e.target.matches('[data-invform]')) { e.preventDefault(); investigate(e.target.ip.value); }
-  });
   $('#searchForm').addEventListener('submit', e => {
     e.preventDefault();
     const q = $('#search').value.trim();
     if (!q) return;
-    if (IP_RX.test(q)) investigate(q);
+    if (IP_RX.test(q)) {
+      // no outside lookup: just find the IP in the feeds already loaded and fly to it
+      const hit = findLoadedIp(q);
+      if (hit?.geo) flyTo(hit.geo.lon, hit.geo.lat, 5);
+      toast(hit ? `${q} is in ${hit.feed}` : `${q} isn't in any loaded feed`);
+    }
     else if (CVE_RX.test(q)) {
       const id = q.toUpperCase();
       const k = D.kev?.items.find(x => x.cve === id);
@@ -882,7 +1581,12 @@ function wire() {
   $('#btnFocus').onclick = () => setLayout(S.layout === 'map' ? (S.prevLayout || 'right') : (S.prevLayout = S.layout, 'map'));
   $('#lcToggle').onclick = () => { S.layerCollapsed = !S.layerCollapsed; $('#layerCtl').classList.toggle('collapsed', S.layerCollapsed); $('#lcToggle').textContent = S.layerCollapsed ? '+' : '–'; save(); };
   $('#kpiToggle').onclick = () => { S.kpiCollapsed = !S.kpiCollapsed; $('#kpiCtl').classList.toggle('collapsed', S.kpiCollapsed); $('#kpiToggle').textContent = S.kpiCollapsed ? '+' : '–'; save(); };
-  $('#railToggle').onclick = () => { if (!S.rail) { S.rail = true; S.railMin = false; } else S.railMin = !S.railMin; save(); applyLook(); syncSegs(); };
+  // On a phone the sidebar is a slide-in sheet; this doesn't touch the saved desktop layout
+  const scrim = document.createElement('div'); scrim.id = 'railScrim'; document.body.appendChild(scrim);
+  const railSheet = open => document.body.classList.toggle('rail-open', open);
+  scrim.onclick = () => railSheet(false);
+  PHONE_MQ.addEventListener('change', () => { railSheet(false); map?.resize(); });
+  $('#railToggle').onclick = () => { if (isPhone()) return railSheet(!document.body.classList.contains('rail-open')); if (!S.rail) { S.rail = true; S.railMin = false; } else S.railMin = !S.railMin; save(); applyLook(); syncSegs(); };
   $('#btnHome').onclick = () => fitWorld();
   const syncPings = () => { $('#btnPings').classList.toggle('on', S.pings); $('#btnPings').textContent = S.pings ? 'Live pings on' : 'Live pings off'; };
   $('#btnPings').onclick = () => { S.pings = !S.pings; save(); syncPings(); };
@@ -890,10 +1594,14 @@ function wire() {
 
   const seg = (sel, fn) => $(sel).addEventListener('click', e => { const b = e.target.closest('button'); if (b) fn(b.dataset.v); });
   seg('#segLayout', v => setLayout(v));
-  seg('#segTheme', v => { S.theme = v; save(); applyLook(); renderLayerList(); });
-  seg('#segBase', v => { S.base = v; save(); applyBase(); syncSegs(); });
+  seg('#segTheme', v => { S.theme = v; save(); applyLook(); renderLayerList(); if (S.base === 'outline' && map) outlinePaint(); });
+  seg('#segBase', v => { if (v === 'outline' && S.base !== 'outline') S.lastBase = S.base; S.base = v; save(); applyBase(); syncSegs(); });
+  if ($('#btnOutline')) $('#btnOutline').onclick = toggleOutline;
   $('#selCols').onchange = e => { S.cols = +e.target.value; save(); applyLook(); };
   $('#selRefresh').onchange = e => { S.refresh = +e.target.value; save(); schedule(); };
+  $('#rowCycle')?.classList.toggle('hidden', SCREEN !== 'analytics');
+  if ($('#selCycle')) { $('#selCycle').value = String(CYC.min); $('#selCycle').onchange = e => setCycle(e.target.value); }
+  if ($('#selStory')) { $('#selStory').value = String(ST.min); $('#selStory').onchange = e => setStory(e.target.value); }
   $('#chkTicker').onchange = e => { S.ticker = e.target.checked; save(); applyLook(); };
   $('#chkRail').onchange = e => { S.rail = e.target.checked; save(); applyLook(); };
   $('#chkCompact').onchange = e => { S.compact = e.target.checked; save(); applyLook(); };
@@ -937,8 +1645,10 @@ function wire() {
     else if (k === 'l') $('#lcToggle').click();
     else if (e.key === '[') $('#railToggle').click();
     else if (k === 'h') fitWorld();
+    else if (k === 'o' && SCREEN === 'face') toggleOutline();
+    else if (k === 't' && !e.ctrlKey && !e.metaKey) { if (ST.on) storyStop(); else setTimeout(() => { ST.manual = true; storyStart(); ST.started = Date.now() + 50; }, 60); }
     else if (k === 'p') { LF.paused = !LF.paused; renderPanel('livefeed'); toast(LF.paused ? 'Live feed paused' : 'Live feed resumed'); }
-    else if (e.key === 'Escape') openDrawer(false);
+    else if (e.key === 'Escape') { openDrawer(false); document.body.classList.remove('rail-open'); }
   });
 
   new Sortable($('#dock'), {
@@ -958,6 +1668,8 @@ function schedule() {
   clearInterval(pollTimer);
   pollTimer = setInterval(async () => { await Promise.all(FEEDS.map(f => loadFeed(f, true))); loadStatus(); }, S.refresh * 60000);
 }
+// provider outages are checked every minute whatever the poll interval, so the alert is never late
+setInterval(() => loadFeed('cloudstatus', true), 60000);
 
 function bootLog(msg) { const el = $('#bootLog'); if (el) el.textContent = msg; }
 
@@ -968,6 +1680,8 @@ async function boot() {
     const c = await (await fetch('/countries.json')).json();
     for (const [k, v] of Object.entries(c)) { COUNTRY_NAME[k] = v[2]; COUNTRY_CENTER[k] = v; }
   } catch { /* names optional */ }
+  document.body.dataset.view = VIEW;
+  renderViewNav();
   applyLook();
   $('#layerCtl').classList.toggle('collapsed', S.layerCollapsed);
   $('#lcToggle').textContent = S.layerCollapsed ? '+' : '–';
@@ -978,9 +1692,11 @@ async function boot() {
   renderKPIs();
   wire();
   if ($('#map')) try { initMap(); } catch (e) { console.error(e); $('#map').innerHTML = `<div class="err" style="padding:20px">Map failed to load: ${esc(e.message)}. Check your connection to unpkg.com and server.arcgisonline.com.</div>`; }
+  if ($('#map') && SCREEN === 'face') $('#mapwrap').insertAdjacentHTML('beforeend', '<div id="mapKey" hidden title="What each mark on the map means. Switch layers on or off under Map overlays."></div>');
+  if ($('#map') && SCREEN === 'face') $('#mapwrap').insertAdjacentHTML('beforeend', '<div id="sevLegend" title="Critical and high-severity events send a shockwave across the map where they land"><b>Pulse</b><span><i style="background:var(--crit);color:var(--crit)"></i>Critical</span><span><i style="background:var(--high);color:var(--high)"></i>High</span><span><i style="background:var(--med);color:var(--med)"></i>New</span></div>');
   renderLayerList();
   bootLog('linking feeds…');
-  const first = ['kev', 'ransomware', 'attackers', 'c2', 'outages', 'news'];
+  const first = ['cloudstatus', 'kev', 'ransomware', 'attackers', 'c2', 'outages', 'news'];
   await Promise.race([Promise.all(first.map(f => loadFeed(f))), new Promise(r => setTimeout(r, 8000))]);
   $('#boot').classList.add('done');
   await Promise.all(FEEDS.filter(f => !first.includes(f)).map(f => loadFeed(f, true)));

@@ -57,23 +57,11 @@ def load_config():
                 cfg = json.load(f)
         except Exception as e:  # noqa: BLE001
             print("[config] could not parse config.json:", e)
-    env = {
-        "abusech_auth_key": "ABUSECH_AUTH_KEY",
-        "nvd_api_key": "NVD_API_KEY",
-        "greynoise_api_key": "GREYNOISE_API_KEY",
-    }
-    for k, var in env.items():
-        if os.environ.get(var):
-            cfg[k] = os.environ[var]
     return {k: str(v).strip() for k, v in cfg.items() if isinstance(v, (str, int, float)) and v != ""}
 
 
+# No API keys are used anywhere: every feed is a free public source.
 CONFIG = load_config()
-
-
-def has_key(name):
-    v = CONFIG.get(name, "")
-    return bool(v) and not v.startswith("YOUR_")
 
 
 # --------------------------------------------------------------------------
@@ -121,6 +109,21 @@ def http_get(url, headers=None, data=None, timeout=30, allow_error_body=False):
 
 def get_json(url, **kw):
     return json.loads(http_get(url, **kw).decode("utf8", "replace"))
+
+
+def get_retry(fn, url, tries=3, waits=(5, 15), **kw):
+    """For sources that throttle or briefly fail (NVD without a key answers 503/429/403 under load): try again
+    after a short wait instead of giving up on the first refusal."""
+    for n in range(tries):
+        try:
+            return fn(url, **kw)
+        except urllib.error.HTTPError as e:
+            if e.code not in (403, 429, 500, 502, 503, 504) or n == tries - 1:
+                raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if n == tries - 1:
+                raise
+        time.sleep(waits[min(n, len(waits) - 1)])
 
 
 def iso(dt):
@@ -185,7 +188,7 @@ def country_geo(cc, seed):
 # --------------------------------------------------------------------------
 # Cache: in-memory with disk persistence; serves stale data if refresh fails
 # --------------------------------------------------------------------------
-CACHE_SCHEMA = 2  # bump when a feed's output shape changes so old disk caches are ignored
+CACHE_SCHEMA = 3  # bump when a feed's output shape changes so old disk caches are ignored
 
 
 class Cache:
@@ -440,8 +443,7 @@ def feed_cves():
     fmt = "%Y-%m-%dT%H:%M:%S.000"
     url = ("https://services.nvd.nist.gov/rest/json/cves/2.0?resultsPerPage=2000&pubStartDate=%s&pubEndDate=%s"
            % (start.strftime(fmt), end.strftime(fmt)))
-    headers = {"apiKey": CONFIG["nvd_api_key"]} if has_key("nvd_api_key") else {}
-    d = get_json(url, headers=headers, timeout=90)
+    d = get_retry(get_json, url, timeout=90)
     items = []
     for w in d.get("vulnerabilities", []):
         c = w["cve"]
@@ -669,10 +671,11 @@ def _one_news(src, url):
         link = _strip(tag("link"))
         if not title or not link.startswith("http"):
             continue
-        desc = _strip(tag("description"))[:260]
-        out.append({"source": src, "title": title, "link": link, "summary": desc,
+        full = _strip(tag("description"))
+        desc = full[:260]
+        out.append({"source": src, "title": title, "link": link, "summary": desc, "text": full[:1500],
                     "published": parse_dt(_strip(tag("pubDate")) or _strip(tag("dc:date"))),
-                    "cves": sorted(set(re.findall(r"CVE-\d{4}-\d{4,7}", title + " " + desc)))[:4],
+                    "cves": sorted(set(re.findall(r"CVE-\d{4}-\d{4,7}", title + " " + full[:1500])))[:8],
                     "tags": _tag(title + " " + desc)})
     return out
 
@@ -692,43 +695,375 @@ def feed_news():
     return {"items": items[:120], "errors": errors, "sources": [s for s, _ in NEWS_FEEDS]}
 
 
-# ---- Optional keyed feeds -------------------------------------------------
+# ---- EPSS scores for the CVEs KESTREL is already tracking -------------------
+def _feed_data(name):
+    fn, ttl, _, _ = FEEDS[name]
+    try:
+        return CACHE.get(name, ttl, fn)["data"]
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def feed_epss():
+    """FIRST.org EPSS (exploit prediction) for recent KEV entries, critical CVEs and CVEs in the news."""
+    kev, cves, news = _feed_data("kev"), _feed_data("cves"), _feed_data("news")
+    cand = []
+    for n in news.get("items", []):
+        cand += n.get("cves", [])
+    cand += [k["cve"] for k in kev.get("items", [])[:40]]
+    scored = sorted([c for c in cves.get("items", []) if c.get("score")], key=lambda c: -c["score"])
+    cand += [c["id"] for c in scored[:40]]
+    seen, ids = set(), []
+    for c in cand:
+        if c not in seen:
+            seen.add(c)
+            ids.append(c)
+    ids = ids[:120]
+    out = {}
+    for i in range(0, len(ids), 40):
+        chunk = ids[i:i + 40]
+        d = get_json("https://api.first.org/data/v1/epss?scope=time-series&cve=" + ",".join(chunk), timeout=40)
+        for r in d.get("data", []):
+            series = [{"date": t.get("date"), "epss": float(t.get("epss") or 0)} for t in (r.get("time-series") or [])]
+            series.sort(key=lambda t: t["date"] or "")
+            out[r["cve"]] = {"cve": r["cve"], "epss": float(r.get("epss") or 0),
+                             "percentile": float(r.get("percentile") or 0), "date": r.get("date"),
+                             "series": [t["epss"] for t in series][-30:]}
+    return {"items": sorted(out.values(), key=lambda r: -r["epss"]), "candidates": len(ids)}
+
+
+# ---- Cloud & SaaS provider status (public status pages) ---------------------
+# Each provider is checked on its own, so one slow or broken status page never hides the others.
+# level: "major" = outage (drives the flashing alert), "minor" = degraded / partial, "info" = notice.
+STATUSPAGE = "statuspage"  # Atlassian Statuspage summary.json, used by many providers
+CLOUD_SERVICES = [
+    # id, name, kind, api url, public page, group
+    ("aws", "AWS", "aws", "https://health.aws.amazon.com/public/currentevents", "https://health.aws.amazon.com/health/status", "Cloud & hosting"),
+    ("azure", "Microsoft Azure", "rss", "https://azure.status.microsoft/en-us/status/feed/", "https://azure.status.microsoft/en-us/status", "Cloud & hosting"),
+    ("gcp", "Google Cloud", "google", "https://status.cloud.google.com/incidents.json", "https://status.cloud.google.com/", "Cloud & hosting"),
+    ("digitalocean", "DigitalOcean", STATUSPAGE, "https://status.digitalocean.com/api/v2/summary.json", "https://status.digitalocean.com/", "Cloud & hosting"),
+    ("vercel", "Vercel", STATUSPAGE, "https://www.vercel-status.com/api/v2/summary.json", "https://www.vercel-status.com/", "Cloud & hosting"),
+    ("netlify", "Netlify", STATUSPAGE, "https://www.netlifystatus.com/api/v2/summary.json", "https://www.netlifystatus.com/", "Cloud & hosting"),
+    ("cloudflare", "Cloudflare", STATUSPAGE, "https://www.cloudflarestatus.com/api/v2/summary.json", "https://www.cloudflarestatus.com/", "Network & CDN"),
+    ("fastly", "Fastly", STATUSPAGE, "https://www.fastlystatus.com/api/v2/summary.json", "https://www.fastlystatus.com/", "Network & CDN"),
+    ("akamai", "Akamai", STATUSPAGE, "https://www.akamaistatus.com/api/v2/summary.json", "https://www.akamaistatus.com/", "Network & CDN"),
+    ("okta", "Okta", "okta", "https://feeds.feedburner.com/OktaTrustRSS", "https://status.okta.com/", "Identity & security"),
+    ("duo", "Cisco Duo", STATUSPAGE, "https://status.duo.com/api/v2/summary.json", "https://status.duo.com/", "Identity & security"),
+    ("1password", "1Password", STATUSPAGE, "https://status.1password.com/api/v2/summary.json", "https://status.1password.com/", "Identity & security"),
+    ("m365", "Microsoft 365", "m365", "https://status.cloud.microsoft/api/posts/m365Consumer", "https://status.cloud.microsoft/", "Work & comms"),
+    ("gws", "Google Workspace", "google", "https://www.google.com/appsstatus/dashboard/incidents.json", "https://www.google.com/appsstatus/dashboard/", "Work & comms"),
+    ("slack", "Slack", "slack", "https://slack-status.com/api/v2.0.0/current", "https://slack-status.com/", "Work & comms"),
+    ("zoom", "Zoom", STATUSPAGE, "https://status.zoom.us/api/v2/summary.json", "https://status.zoom.us/", "Work & comms"),
+    ("discord", "Discord", STATUSPAGE, "https://discordstatus.com/api/v2/summary.json", "https://discordstatus.com/", "Work & comms"),
+    ("dropbox", "Dropbox", STATUSPAGE, "https://status.dropbox.com/api/v2/summary.json", "https://status.dropbox.com/", "Work & comms"),
+    ("atlassian", "Atlassian", STATUSPAGE, "https://status.atlassian.com/api/v2/summary.json", "https://status.atlassian.com/", "Work & comms"),
+    ("salesforce", "Salesforce", "salesforce", "https://api.status.salesforce.com/v1/incidents/active", "https://status.salesforce.com/", "Work & comms"),
+    ("hubspot", "HubSpot", STATUSPAGE, "https://status.hubspot.com/api/v2/summary.json", "https://status.hubspot.com/", "Work & comms"),
+    ("github", "GitHub", STATUSPAGE, "https://www.githubstatus.com/api/v2/summary.json", "https://www.githubstatus.com/", "Dev & ops"),
+    ("datadog", "Datadog", STATUSPAGE, "https://status.datadoghq.com/api/v2/summary.json", "https://status.datadoghq.com/", "Dev & ops"),
+    ("newrelic", "New Relic", STATUSPAGE, "https://status.newrelic.com/api/v2/summary.json", "https://status.newrelic.com/", "Dev & ops"),
+    ("twilio", "Twilio", STATUSPAGE, "https://status.twilio.com/api/v2/summary.json", "https://status.twilio.com/", "Dev & ops"),
+    ("openai", "OpenAI", STATUSPAGE, "https://status.openai.com/api/v2/summary.json", "https://status.openai.com/", "AI"),
+    ("anthropic", "Claude", STATUSPAGE, "https://status.claude.com/api/v2/summary.json", "https://status.claude.com/", "AI"),
+    ("apple", "Apple", "apple", "https://www.apple.com/support/systemstatus/data/system_status_en_US.js", "https://www.apple.com/support/systemstatus/", "Consumer"),
+    ("shopify", "Shopify", STATUSPAGE, "https://www.shopifystatus.com/api/v2/summary.json", "https://www.shopifystatus.com/", "Consumer"),
+    ("epic", "Epic Games", STATUSPAGE, "https://status.epicgames.com/api/v2/summary.json", "https://status.epicgames.com/", "Consumer"),
+]
+LONG_RUNNING_H = 72  # incidents older than this stay listed but no longer flash the alert
+
+
+def _ts(v):
+    """Epoch seconds/ms or a date string -> ISO 8601 UTC (or None)."""
+    if v in (None, ""):
+        return None
+    try:
+        n = float(v)
+        return iso(datetime.fromtimestamp(n / 1000 if n > 1e11 else n, timezone.utc))
+    except (TypeError, ValueError):
+        return parse_dt(str(v))
+
+
+def _cs_statuspage(url):
+    d = get_json(url, timeout=20)
+    out = []
+    for i in d.get("incidents") or []:
+        if i.get("status") in ("resolved", "postmortem"):
+            continue
+        imp = i.get("impact") or "none"
+        out.append({"id": i.get("id"), "title": i.get("name") or "Incident",
+                    "level": "major" if imp in ("major", "critical") else "minor" if imp == "minor" else "info",
+                    "status": i.get("status"), "started": _ts(i.get("started_at") or i.get("created_at")),
+                    "updated": _ts(i.get("updated_at")), "url": i.get("shortlink"),
+                    "detail": _strip(((i.get("incident_updates") or [{}])[0]).get("body"))[:300],
+                    "components": [c.get("name") for c in (i.get("components") or [])][:6]})
+    bad = [c for c in d.get("components") or [] if c.get("status") in ("major_outage", "partial_outage", "degraded_performance")
+           and not c.get("group")]
+    for c in bad:
+        if any(c.get("name") in x["components"] for x in out):
+            continue
+        out.append({"id": "c-" + str(c.get("id")), "title": "%s: %s" % (c.get("name"), c.get("status", "").replace("_", " ")),
+                    "level": "major" if c.get("status") == "major_outage" else "minor", "status": c.get("status"),
+                    "started": _ts(c.get("updated_at")), "updated": _ts(c.get("updated_at")), "url": None, "detail": "",
+                    "components": [c.get("name")]})
+    return out
+
+
+def _cs_aws(url):
+    raw = http_get(url, timeout=25)
+    txt = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig", "replace")
+    out = []
+    for e in json.loads(txt or "[]"):
+        cur = [int(s.get("current") or 0) for s in (e.get("impacted_services") or {}).values()]
+        st = max(cur) if cur else int(e.get("status") or 0)
+        if st <= 0:
+            continue
+        log = sorted(e.get("event_log") or [], key=lambda x: x.get("timestamp") or 0)
+        svcs = [s.get("service_name") for s in (e.get("impacted_services") or {}).values() if int(s.get("current") or 0) > 0]
+        out.append({"id": e.get("arn") or e.get("service"), "title": "%s · %s%s" % (e.get("service_name") or e.get("service"),
+                    e.get("summary") or "Service event", (" (" + e["region_name"] + ")") if e.get("region_name") else ""),
+                    "level": "major" if st >= 3 else "minor" if st == 2 else "info", "status": str(st),
+                    "started": _ts(e.get("date")), "updated": _ts(log[-1].get("timestamp")) if log else _ts(e.get("date")),
+                    "url": None, "detail": _strip(log[-1].get("message"))[:300] if log else "", "components": svcs[:6]})
+    return out
+
+
+def _cs_google(url):
+    out = []
+    for i in get_json(url, timeout=25):
+        if i.get("end"):
+            continue
+        imp = i.get("status_impact") or ""
+        upd = i.get("most_recent_update") or {}
+        out.append({"id": i.get("id"), "title": i.get("external_desc") or "Incident",
+                    "level": "major" if imp == "SERVICE_OUTAGE" or i.get("severity") == "high" else
+                             "minor" if imp == "SERVICE_DISRUPTION" else "info",
+                    "status": upd.get("status") or imp, "started": _ts(i.get("begin")), "updated": _ts(i.get("modified")),
+                    "url": ("https://status.cloud.google.com/" + i["uri"]) if "cloud.google" in url and i.get("uri") else None,
+                    "detail": _strip(upd.get("text"))[:300],
+                    "components": [p.get("title") for p in (i.get("affected_products") or [])][:6]})
+    return out
+
+
+def _cs_rss(url):
+    """Azure: the feed only carries items while an incident is open."""
+    raw = http_get(url, timeout=20).decode("utf8", "replace")
+    out = []
+    for m in re.finditer(r"<item\b.*?</item>", raw, re.S):
+        blk = m.group(0)
+        g = lambda n: _strip((re.search(r"<%s\b[^>]*>(.*?)</%s>" % (n, n), blk, re.S) or [None, ""])[1])  # noqa: E731
+        title, when = g("title"), parse_dt(g("pubDate"))
+        if not title or re.search(r"\b(resolved|mitigated|post incident review|\bPIR\b)", title, re.I):
+            continue
+        out.append({"id": g("guid") or title, "title": title,
+                    "level": "minor" if re.search(r"degrad|intermittent|delay|latency|some customers", title, re.I) else "major",
+                    "status": "active", "started": when, "updated": when, "url": g("link") or None,
+                    "detail": g("description")[:300], "components": []})
+    return out
+
+
+def _cs_okta(url):
+    raw = http_get(url, timeout=20).decode("utf8", "replace")
+    out = []
+    cut = now_utc() - timedelta(hours=48)
+    for m in re.finditer(r"<entry\b.*?</entry>", raw, re.S):
+        blk = m.group(0)
+        g = lambda n: _strip((re.search(r"<%s\b[^>]*>(.*?)</%s>" % (n, n), blk, re.S) or [None, ""])[1])  # noqa: E731
+        title, when = g("title"), parse_dt(g("updated"))
+        if not title or title.lower().startswith("resolved") or not when or when < iso(cut):
+            continue
+        link = re.search(r'<link[^>]*href="([^"]+)"', blk)
+        out.append({"id": g("id") or title, "title": title,
+                    "level": "major" if re.search(r"service disruption|outage", title, re.I) else "minor",
+                    "status": "active", "started": when, "updated": when, "url": link and link.group(1),
+                    "detail": g("content")[:300], "components": []})
+    return out
+
+
+def _cs_slack(url):
+    d = get_json(url, timeout=20)
+    out = []
+    for i in d.get("active_incidents") or []:
+        typ = i.get("type") or "incident"
+        out.append({"id": str(i.get("id")), "title": i.get("title") or "Incident",
+                    "level": "major" if typ == "outage" else "minor" if typ == "incident" else "info",
+                    "status": i.get("status"), "started": _ts(i.get("date_created")), "updated": _ts(i.get("date_updated")),
+                    "url": i.get("url"), "detail": "", "components": (i.get("services") or [])[:6]})
+    return out
+
+
+def _cs_m365(url):
+    out = []
+    for p in get_json(url, timeout=20):
+        st = p.get("Status") or ""
+        if not st or st.lower() in ("operational", "serviceoperational", "resolved", "servicerestored"):
+            continue
+        out.append({"id": p.get("Id") or p.get("ServiceWorkloadName"), "title": "%s: %s" % (p.get("ServiceDisplayName"), p.get("Title") or st),
+                    "level": "major" if re.search(r"interrupt|outage|down|unavailable", st, re.I) else "minor",
+                    "status": st, "started": _ts(p.get("AuthoredDateTime")), "updated": _ts(p.get("LastUpdatedTime")),
+                    "url": None, "detail": _strip(p.get("Message"))[:300], "components": [p.get("ServiceDisplayName")]})
+    return out
+
+
+def _cs_apple(url):
+    """Apple System Status: only events that are still ongoing."""
+    txt = http_get(url, timeout=20).decode("utf-8-sig", "replace").strip()
+    if not txt.startswith("{"):
+        txt = txt[txt.index("(") + 1:txt.rindex(")")]  # older JSONP wrapper
+    out = []
+    for sv in json.loads(txt).get("services") or []:
+        for e in sv.get("events") or []:
+            if (e.get("eventStatus") or "").lower() != "ongoing":
+                continue
+            typ = e.get("statusType") or "Issue"
+            out.append({"id": "%s-%s" % (sv.get("serviceName"), e.get("messageId") or e.get("epochStartDate")),
+                        "title": "%s: %s" % (sv.get("serviceName"), typ),
+                        "level": "major" if typ.lower() == "outage" else "info" if "maint" in typ.lower() else "minor",
+                        "status": e.get("eventStatus"), "started": _ts(e.get("epochStartDate")), "updated": _ts(e.get("epochStartDate")),
+                        "url": None, "detail": _strip(e.get("message"))[:300], "components": [sv.get("serviceName")]})
+    return out
+
+
+def _cs_salesforce(url):
+    """Salesforce Trust: active incidents across all instances."""
+    out = []
+    for i in get_json(url, timeout=20) or []:
+        imp = [x for x in (i.get("IncidentImpacts") or []) if not x.get("endTime")] or (i.get("IncidentImpacts") or [])
+        types = " ".join(str(x.get("type") or "") for x in imp).lower()
+        ev = sorted(i.get("IncidentEvents") or [], key=lambda x: x.get("createdAt") or "")
+        svc = ", ".join(i.get("serviceKeys") or []) or "Salesforce"
+        inst = i.get("instanceKeys") or []
+        out.append({"id": str(i.get("id")), "title": "%s incident%s" % (svc, (" on " + ", ".join(inst[:4]) + (" +%d" % (len(inst) - 4) if len(inst) > 4 else "")) if inst else ""),
+                    "level": "major" if "major" in types or "outage" in types else "minor",
+                    "status": "active", "started": _ts(i.get("createdAt")), "updated": _ts(i.get("updatedAt")),
+                    "url": "https://status.salesforce.com/incidents/%s" % i.get("id"),
+                    "detail": _strip(ev[-1].get("message") if ev else "")[:300], "components": (i.get("serviceKeys") or [])[:6]})
+    return out
+
+
+CS_KIND = {STATUSPAGE: _cs_statuspage, "aws": _cs_aws, "google": _cs_google, "rss": _cs_rss, "okta": _cs_okta,
+           "slack": _cs_slack, "m365": _cs_m365, "apple": _cs_apple, "salesforce": _cs_salesforce}
+
+
+def _cloud_services():
+    svcs = list(CLOUD_SERVICES)
+    # extra Statuspage providers from config.json: "status_pages": {"Name": "https://status.example.com"}
+    try:
+        extra = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8")).get("status_pages") or {}
+    except Exception:  # noqa: BLE001
+        extra = {}
+    for name, base in extra.items():
+        base = str(base).rstrip("/")
+        api = base if base.endswith(".json") else base + "/api/v2/summary.json"
+        svcs.append((re.sub(r"\W+", "-", name.lower()), name, STATUSPAGE, api, base.split("/api/")[0] + "/", "Your status pages"))
+    return svcs
+
+
+def _cs_one(svc):
+    sid, name, kind, api, page, group = svc
+    try:
+        inc = CS_KIND[kind](api)
+        err = None
+    except Exception as e:  # noqa: BLE001
+        inc, err = [], str(e)[:160]
+    now = now_utc()
+    for i in inc:
+        i["url"] = i.get("url") or page
+        try:
+            age_h = (now - datetime.strptime(i["started"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)).total_seconds() / 3600
+        except Exception:  # noqa: BLE001
+            age_h = 0
+        i["longRunning"] = age_h > LONG_RUNNING_H
+    # a months-long regional event shouldn't paint the provider red forever: it counts as degraded
+    lv = ["minor" if i["level"] == "major" and i["longRunning"] else i["level"] for i in inc]
+    state = "unknown" if err else "major" if "major" in lv else "minor" if "minor" in lv else "ok"
+    inc.sort(key=lambda i: ({"major": 0, "minor": 1}.get(i["level"], 2), i.get("started") or ""))
+    return {"id": sid, "name": name, "group": group, "page": page, "state": state, "incidents": inc[:12], "error": err}
+
+
+def feed_cloudstatus():
+    svcs = _cloud_services()
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        res = list(ex.map(_cs_one, svcs))
+    if all(r["error"] for r in res):
+        raise IOError("no status page could be reached: %s" % res[0]["error"])
+    alerts = [{"key": "%s|%s" % (r["id"], i["id"]), "service": r["name"], "title": i["title"], "started": i["started"],
+               "url": i["url"], "level": i["level"]}
+              for r in res for i in r["incidents"] if i["level"] == "major" and not i["longRunning"]]
+    return {"services": res, "alerts": alerts, "checked": iso(now_utc()),
+            "major": sum(r["state"] == "major" for r in res), "minor": sum(r["state"] == "minor" for r in res),
+            "unknown": sum(r["state"] == "unknown" for r in res)}
+
+
+# ---- C2 IOCs and malware URLs (keyless) ------------------------------------
+# abuse.ch now needs an Auth-Key for ThreatFox, so the "threatfox" feed is built from C2IntelFeeds
+# (public C2 server lists published on GitHub). The panel and layer ids stay the same.
+C2INTEL = "https://raw.githubusercontent.com/drb-ra/C2IntelFeeds/master/feeds/"
+
+
+def _c2intel_family(desc):
+    d = re.sub(r"^Possible\s+", "", (desc or "").strip(), flags=re.I)
+    d = re.sub(r"\s*\(Unverified\)$", "", d, flags=re.I)
+    d = re.sub(r"(\s+C2)?\s+IP$", "", d, flags=re.I)
+    return {"Cobaltstrike": "Cobalt Strike"}.get(d, d) or "Unknown"
+
+
 def feed_threatfox():
-    if not has_key("abusech_auth_key"):
-        return {"needsKey": "abusech_auth_key", "items": []}
-    d = get_json("https://threatfox-api.abuse.ch/api/v1/", data=json.dumps({"query": "get_iocs", "days": 1}),
-                 headers={"Auth-Key": CONFIG["abusech_auth_key"], "Content-Type": "application/json"})
-    rows = d.get("data") or []
-    if not isinstance(rows, list):
-        rows = []
-    items = []
-    for x in rows[:600]:
-        ioc = x.get("ioc") or ""
-        t = x.get("ioc_type") or ""
-        ip = None
-        if t == "ip:port":
-            ip = norm_ip(ioc.rsplit(":", 1)[0])
-        elif t in ("domain", "url"):
-            host = urllib.parse.urlsplit(ioc).hostname if t == "url" else ioc
-            ip = host_ip(host) if host else None
-        items.append({"ioc": defang(ioc) if t in ("url", "domain") else ioc, "type": t, "threat": x.get("threat_type"),
-                      "malware": x.get("malware_printable"), "confidence": x.get("confidence_level"),
-                      "firstSeen": parse_dt(x.get("first_seen")), "tags": x.get("tags") or [], "ip": ip})
+    def rows(path):
+        txt = http_get(C2INTEL + path, timeout=40).decode("utf8", "replace")
+        return [l.split(",") for l in txt.splitlines() if l and not l.startswith("#")]
+    items, seen = [], set()
+    for r in rows("IPPortC2s-30day.csv"):  # verified, with port
+        ip = norm_ip(r[0]) if len(r) >= 3 else None
+        if ip and ip not in seen:
+            seen.add(ip)
+            items.append({"ioc": "%s:%s" % (ip, r[1]), "type": "ip:port", "threat": "botnet_cc", "malware": _c2intel_family(r[-1]),
+                          "confidence": 90, "firstSeen": None, "tags": ["verified"], "ip": ip})
+    # unverified scanner hits: up to 450, shared fairly between tool families so the mix shows
+    fam = {}
+    for r in rows("unverified/IPC2s.csv"):
+        ip = norm_ip(r[0]) if len(r) >= 2 else None
+        if ip and ip not in seen:
+            seen.add(ip)
+            fam.setdefault(_c2intel_family(r[-1]), []).append(ip)
+    queues = sorted(fam.items(), key=lambda kv: -len(kv[1]))
+    while len(items) < 600 and any(q for _, q in queues):
+        for f, q in queues:
+            if q and len(items) < 600:
+                ip = q.pop(0)
+                items.append({"ioc": ip, "type": "ip", "threat": "botnet_cc", "malware": f, "confidence": 50,
+                              "firstSeen": None, "tags": ["unverified"], "ip": ip})
+    if not items:
+        raise IOError("C2IntelFeeds returned no rows")
     return {"items": items, "families": Counter(x["malware"] for x in items).most_common(10)}
 
 
 def feed_urlhaus():
-    if not has_key("abusech_auth_key"):
-        return {"needsKey": "abusech_auth_key", "items": []}
-    d = get_json("https://urlhaus-api.abuse.ch/v1/urls/recent/limit/400/", data=b"",
-                 headers={"Auth-Key": CONFIG["abusech_auth_key"]})
+    """URLhaus public list of online malware URLs (the plain-text export needs no key)."""
+    # the online list first; if abuse.ch refuses it (it has answered 410 at times), the last-30-days list
+    err = None
+    for src in ("https://urlhaus.abuse.ch/downloads/text_online/", "https://urlhaus.abuse.ch/downloads/text_recent/"):
+        try:
+            txt = get_retry(http_get, src, tries=2, waits=(5,), timeout=40, headers={"Accept": "text/plain"}).decode("utf8", "replace")
+            if "http" in txt:
+                live = src.endswith("text_online/")
+                break
+        except Exception as e:  # noqa: BLE001
+            err = e
+    else:
+        raise err or IOError("URLhaus returned an empty list")
+    urls = [u.strip() for u in txt.split() if u.strip().startswith("http")]
     items = []
-    for x in d.get("urls") or []:
-        host = x.get("host") or ""
-        items.append({"url": defang(x.get("url") or ""), "host": host, "status": x.get("url_status"),
-                      "threat": x.get("threat"), "tags": x.get("tags") or [],
-                      "added": parse_dt(x.get("date_added")), "ip": host_ip(host) if host else None})
-    return {"items": items, "online": sum(1 for x in items if x["status"] == "online")}
+    for u in urls[:400]:
+        host = (urllib.parse.urlsplit(u).hostname or "").lower()
+        if not host:
+            continue
+        path = urllib.parse.urlsplit(u).path.lower()
+        tags = [t for t, rx in (("elf", r"(\.sh|mips|arm\d?|x86|\.m68k|/i)$"), ("exe", r"\.(exe|msi|dll|scr)$"),
+                                ("script", r"\.(ps1|vbs|js|hta|bat|lnk)$"), ("archive", r"\.(zip|rar|7z|iso)$"))
+                if re.search(rx, path)]
+        items.append({"url": defang(u), "host": host, "status": "online" if live else "listed", "threat": "malware_download",
+                      "tags": tags, "added": None, "ip": norm_ip(host)})
+    return {"items": items, "online": len(items) if live else 0, "total": len(urls), "list": "online" if live else "recent"}
 
 
 def feed_porthist():
@@ -782,10 +1117,12 @@ FEEDS = {
     "outages": (feed_outages, 900, None, "IODA (Georgia Tech)"),
     "cables": (feed_cables, 86400, None, "TeleGeography Submarine Cable Map"),
     "news": (feed_news, 1200, None, "Security RSS"),
-    "threatfox": (feed_threatfox, 1800, "ip", "abuse.ch ThreatFox (key)"),
-    "urlhaus": (feed_urlhaus, 1800, "ip", "abuse.ch URLhaus (key)"),
+    "threatfox": (feed_threatfox, 3600, "ip", "C2IntelFeeds (C2 servers)"),
+    "urlhaus": (feed_urlhaus, 1800, "ip", "abuse.ch URLhaus online list"),
     "porthist": (feed_porthist, 6 * 3600, None, "SANS ISC port history"),
     "home": (feed_home, 86400, None, "Observer location"),
+    "epss": (feed_epss, 6 * 3600, None, "FIRST.org EPSS"),
+    "cloudstatus": (feed_cloudstatus, 120, None, "Provider status pages"),
 }
 
 
@@ -820,93 +1157,7 @@ def status():
         out[name] = {"source": label, "updated": ent and ent["updated"], "ttl": ttl,
                      "error": CACHE.errors.get(name)}
     return {"feeds": out, "geo": {"pending": len(GEO.pending), "known": len(GEO.db), "error": GEO.last_error},
-            "keys": {k: has_key(k) for k in ("abusech_auth_key", "nvd_api_key", "greynoise_api_key")},
             "ports": PORTS, "server_time": iso(now_utc())}
-
-
-# ---- IP investigation -----------------------------------------------------
-_SETS = {"ts": 0}
-_SETS_LOCK = threading.Lock()
-
-
-def _reputation_sets():
-    with _SETS_LOCK:
-        if time.time() - _SETS["ts"] < 3600:
-            return _SETS
-        try:
-            cins = http_get("https://cinsscore.com/list/ci-badguys.txt", timeout=40).decode("utf8", "replace")
-            _SETS["cins"] = set(cins.split())
-        except Exception:  # noqa: BLE001
-            _SETS.setdefault("cins", set())
-        try:
-            raw = http_get("https://www.spamhaus.org/drop/drop_v4.json", timeout=40).decode("utf8", "replace")
-            nets = []
-            for line in raw.splitlines():
-                try:
-                    j = json.loads(line)
-                    if "cidr" in j:
-                        nets.append((ipaddress.ip_network(j["cidr"]), j.get("sblid")))
-                except ValueError:
-                    continue
-            _SETS["drop"] = nets
-        except Exception:  # noqa: BLE001
-            _SETS.setdefault("drop", [])
-        _SETS["ts"] = time.time()
-        return _SETS
-
-
-def lookup_ip(ip):
-    ip = norm_ip(ip)
-    if not ip:
-        return {"error": "Not a valid public IP address"}
-    hits = []
-
-    def scan(feed, label, items, field="ip"):
-        for it in items:
-            if it.get(field) == ip:
-                hits.append({"feed": label, "detail": {k: v for k, v in it.items() if k not in ("geo",)}})
-
-    for name, label in (("c2", "Feodo Tracker C2"), ("tor", "Tor exit node"), ("phishing", "OpenPhish host"),
-                        ("threatfox", "ThreatFox IOC"), ("urlhaus", "URLhaus host")):
-        ent = CACHE.mem.get(name)
-        if ent:
-            scan(name, label, ent["data"].get("items", []))
-    ent = CACHE.mem.get("attackers")
-    if ent:
-        scan("attackers", "SANS ISC top attacker", ent["data"].get("items", []))
-        scan("attackers", "Emerging Threats compromised", ent["data"].get("compromised", []))
-    sets = _reputation_sets()
-    if ip in sets.get("cins", ()):
-        hits.append({"feed": "CINS Army bad-guys list", "detail": {}})
-    addr = ipaddress.ip_address(ip)
-    for net, sbl in sets.get("drop", []):
-        if addr.version == net.version and addr in net:
-            hits.append({"feed": "Spamhaus DROP", "detail": {"cidr": str(net), "sbl": sbl}})
-            break
-    geo = GEO.db.get(ip)
-    if geo is None:
-        try:
-            r = get_json("http://ip-api.com/json/%s?fields=%s" % (ip, Geo.FIELDS))
-            if r.get("status") == "success":
-                geo = {"lat": r["lat"], "lon": r["lon"], "cc": r.get("countryCode"), "country": r.get("country"),
-                       "city": r.get("city"), "isp": r.get("isp"), "as": r.get("as")}
-                GEO.db[ip] = geo
-        except Exception:  # noqa: BLE001
-            pass
-    gn = None
-    try:
-        h = {"key": CONFIG["greynoise_api_key"]} if has_key("greynoise_api_key") else {}
-        gn = get_json("https://api.greynoise.io/v3/community/" + ip, headers=h, allow_error_body=True)
-    except Exception as e:  # noqa: BLE001
-        gn = {"error": str(e)[:120]}
-    rdns = None
-    try:
-        rdns = socket.gethostbyaddr(ip)[0]
-    except Exception:  # noqa: BLE001
-        pass
-    return {"ip": ip, "geo": geo, "rdns": rdns, "greynoise": gn, "hits": hits,
-            "verdict": "listed" if hits or (gn and gn.get("classification") == "malicious") else
-                       ("noise" if gn and gn.get("noise") else "clean")}
 
 
 # --------------------------------------------------------------------------
@@ -951,8 +1202,6 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 if name == "status":
                     return self._json(status())
-                if name == "lookup":
-                    return self._json(lookup_ip((q.get("ip") or [""])[0]))
                 if name in FEEDS:
                     return self._json(build_feed(name))
                 return self._json({"error": "unknown endpoint"}, 404)
@@ -978,15 +1227,23 @@ class AnalyticsHandler(Handler):
         return super().do_GET()
 
 
+class MitreHandler(Handler):
+    """Screen 3: same API and assets, but / serves the MITRE ATT&CK page."""
+
+    def do_GET(self):
+        if urllib.parse.urlsplit(self.path).path in ("/", "/index.html"):
+            self.path = "/mitre.html"
+        return super().do_GET()
+
+
 def prewarm():
     order = ["kev", "ransomware", "c2", "attackers", "outages", "news", "cves", "phishing", "tor", "cables",
-             "threatfox", "urlhaus", "porthist", "home"]
+             "threatfox", "urlhaus", "porthist", "home", "epss", "cloudstatus"]
     for name in order:
         try:
             build_feed(name)
         except Exception:  # noqa: BLE001
             pass
-    _reputation_sets()
 
 
 def main():
@@ -995,11 +1252,13 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("KESTREL_PORT", "8787")))
     ap.add_argument("--analytics-port", type=int, default=int(os.environ.get("KESTREL_ANALYTICS_PORT", "8788")),
                     help="port for screen 2 (analytics); 0 disables it")
+    ap.add_argument("--mitre-port", type=int, default=int(os.environ.get("KESTREL_MITRE_PORT", "8789")),
+                    help="port for screen 3 (MITRE ATT&CK); 0 disables it")
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     srv.daemon_threads = True
-    PORTS.update(face=args.port, analytics=args.analytics_port or None)
+    PORTS.update(face=args.port, analytics=args.analytics_port or None, mitre=args.mitre_port or None)
     shown = "127.0.0.1" if args.host in ("0.0.0.0", "") else args.host
     url = "http://%s:%d/" % (shown, args.port)
     if args.analytics_port:
@@ -1007,12 +1266,17 @@ def main():
         asrv.daemon_threads = True
         threading.Thread(target=asrv.serve_forever, daemon=True, name="analytics").start()
         url += "   analytics: http://%s:%d/" % (shown, args.analytics_port)
+    if args.mitre_port:
+        msrv = ThreadingHTTPServer((args.host, args.mitre_port), MitreHandler)
+        msrv.daemon_threads = True
+        threading.Thread(target=msrv.serve_forever, daemon=True, name="mitre").start()
+        url += "   mitre: http://%s:%d/" % (shown, args.mitre_port)
     print(r"""
    _  _______ ___ _____ ___ ___ _
   | |/ / ____/ __|_   _| _ \ __| |      Cyber Threat Observatory
   | ' <| _|  \__ \ | | |   / _|| |__    %s
-  |_|\_\___| |___/ |_| |_|_\___|____|   keys: %s
-""" % (url, ", ".join(k for k, v in status()["keys"].items() if v) or "none (keyless mode)"))
+  |_|\_\___| |___/ |_| |_|_\___|____|   free public feeds, no API keys
+""" % url)
     threading.Thread(target=prewarm, daemon=True).start()
     # stop.bat reads this to find the running server
     pid_file = os.path.join(ROOT, ".kestrel.pid")
